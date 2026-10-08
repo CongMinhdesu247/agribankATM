@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+backups/
+uploads/
+data/
+*.db
+*.db-shm
+*.db-wal
+core_log.csv
+partner_log.csv
+core_log_uploaded_last.csv
+partner_log_uploaded_last.csv
+

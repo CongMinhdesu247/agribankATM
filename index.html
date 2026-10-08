@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agribank - Hệ Thống Đối Soát & Tra Soát Giao Dịch</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <!-- Chart.js cho Biểu đồ -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background-color: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; min-height: 100vh; }
+        .main-content { flex: 1; }
+        .navbar-agribank { background-color: #800000; }
+        .card-stat { border-radius: 10px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .nav-tabs .nav-link.active { font-weight: bold; color: #800000; border-bottom: 3px solid #800000; }
+        .nav-tabs .nav-link { color: #555; }
+        .chart-container { position: relative; height: 260px; width: 100%; }
+
+        /* Style Chân trang Footer Agribank */
+        .footer-agribank { background-color: #a80022; color: #ffffff; font-size: 0.9rem; }
+        .footer-agribank a { color: #ffffff; text-decoration: none; }
+        .footer-agribank a:hover { text-decoration: underline; }
+        .footer-icon-circle { width: 36px; height: 36px; border: 1px solid rgba(255,255,255,0.6); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
+        .app-badge { height: 40px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+
+    <div class="main-content">
+        <!-- Header -->
+        <nav class="navbar navbar-dark navbar-agribank px-4 mb-4">
+            <div class="d-flex align-items-center gap-3">
+                <!-- Logo Agribank click ra trang chủ -->
+                <a href="https://www.agribank.com.vn/" target="_blank" title="Trang chủ Agribank" class="d-flex align-items-center text-decoration-none">
+                    <img src="/static/logo.png" alt="Agribank Logo" height="38" class="rounded me-2" style="object-fit: cover;">
+                </a>
+                <span class="navbar-brand fw-bold fs-5 m-0">AGRIBANK - HỆ THỐNG ĐỐI SOÁT & TRA SOÁT GIAO DỊCH</span>
+            </div>
+            <div class="text-white d-flex align-items-center gap-3">
+                <span><i class="bi bi-person-circle me-1"></i> Cán bộ: <strong id="current-user-display">Chưa đăng nhập</strong></span>
+                <button class="btn btn-sm btn-outline-light" onclick="logout()"><i class="bi bi-box-arrow-right me-1"></i>Đăng xuất</button>
+            </div>
+        </nav>
+
+        <div class="container-fluid px-4 mb-5">
+            <!-- Thống kê Dashboard Cards -->
+            <div class="row g-3 mb-4">
+                <div class="col-md-3">
+                    <div class="card card-stat bg-white p-3 border-start border-success border-4">
+                        <div class="text-muted small">GIAO DỊCH KHỚP (MATCHED)</div>
+                        <div class="fs-3 fw-bold text-success" id="stat-matched">0</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-stat bg-white p-3 border-start border-warning border-4">
+                        <div class="text-muted small">LỆCH TIỀN (AMOUNT MISMATCH)</div>
+                        <div class="fs-3 fw-bold text-warning" id="stat-amount-mismatch">0</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-stat bg-white p-3 border-start border-danger border-4">
+                        <div class="text-muted small">LỆCH TRẠNG THÁI / TREO</div>
+                        <div class="fs-3 fw-bold text-danger" id="stat-status-mismatch">0</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-stat bg-white p-3 border-start border-secondary border-4">
+                        <div class="text-muted small">MẤT VẾT 1 BÊN</div>
+                        <div class="fs-3 fw-bold text-secondary" id="stat-missing">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Khối Biểu Đồ Thống Kê (Charts) -->
+            <div class="row g-3 mb-4">
+                <div class="col-md-7">
+                    <div class="card border-0 shadow-sm p-3">
+                        <h6 class="fw-bold text-secondary mb-3"><i class="bi bi-bar-chart-fill me-2 text-danger"></i>Thống Kê Chi Tiết Các Loại Giao Dịch Lệch (Anomalies)</h6>
+                        <div class="chart-container">
+                            <canvas id="barChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-5">
+                    <div class="card border-0 shadow-sm p-3">
+                        <h6 class="fw-bold text-secondary mb-3"><i class="bi bi-pie-chart-fill me-2 text-warning"></i>Tỷ Lệ Phân Loại Các Giao Dịch Lệch</h6>
+                        <div class="chart-container">
+                            <canvas id="pieChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Điều hướng Tab -->
+            <ul class="nav nav-tabs mb-3" id="mainTab" role="tablist">
+                <li class="nav-item">
+                    <button class="nav-link active" id="anomalies-tab" data-bs-toggle="tab" data-bs-target="#anomalies-pane" type="button">
+                        <i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>Giao Dịch Lệch Cần Xử Lý
+                    </button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link" id="audit-tab" data-bs-toggle="tab" data-bs-target="#audit-pane" type="button" onclick="loadAuditLogs()">
+                        <i class="bi bi-journal-check text-primary me-2"></i>Lịch Sử Kiểm Toán (Audit Logs)
+                    </button>
+                </li>
+            </ul>
+
+            <div class="tab-content" id="mainTabContent">
+                <!-- TAB 1: DANH SÁCH LỖI -->
+                <div class="tab-pane fade show active" id="anomalies-pane">
+                    <div class="card border-0 shadow-sm">
+                        <!-- KHỐI TIÊU ĐỀ BẢNG VÀ CÁC NÚT BẤM CHUẨN -->
+                        <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                            <h5 class="m-0 fw-bold text-danger">
+                                <i class="bi bi-list-task me-2"></i>Danh Sách Giao Dịch Chờ Tra Soát
+                            </h5>
+                            
+                            <!-- Cụm nút nằm gọn gàng bên phải -->
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn btn-outline-success btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#uploadModal">
+                                    <i class="bi bi-cloud-upload me-1"></i> Tải Lên File Log Đối Soát
+                                </button>
+                                <button type="button" id="restore-initial-button" class="btn btn-outline-danger btn-sm fw-bold" onclick="restoreInitialData()">
+                                    <i class="bi bi-arrow-clockwise me-1"></i> Làm mới
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body border-bottom bg-light">
+                            <h6 class="fw-bold text-secondary mb-2"><i class="bi bi-search me-1"></i>Tìm kiếm và lọc giao dịch</h6>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-12 col-md-3">
+                                    <label for="filter-trans-id" class="form-label small fw-bold mb-1">Mã giao dịch</label>
+                                    <input id="filter-trans-id" class="form-control form-control-sm" type="search" placeholder="Nhập mã giao dịch" oninput="applyTransactionFilters()">
+                                </div>
+                                <div class="col-6 col-md-2">
+                                    <label for="filter-recon-status" class="form-label small fw-bold mb-1">Loại đối soát</label>
+                                    <select id="filter-recon-status" class="form-select form-select-sm" onchange="applyTransactionFilters()">
+                                        <option value="">Tất cả loại</option>
+                                        <option value="AMOUNT_MISMATCH">Lệch tiền</option>
+                                        <option value="STATUS_MISMATCH">Lệch trạng thái</option>
+                                        <option value="MISSING_IN_CORE">Thiếu Core</option>
+                                        <option value="MISSING_IN_PARTNER">Thiếu Napas</option>
+                                    </select>
+                                </div>
+                                <div class="col-6 col-md-2">
+                                    <label for="filter-core-status" class="form-label small fw-bold mb-1">Trạng thái Core</label>
+                                    <select id="filter-core-status" class="form-select form-select-sm" onchange="applyTransactionFilters()">
+                                        <option value="">Tất cả</option>
+                                    </select>
+                                </div>
+                                <div class="col-6 col-md-2">
+                                    <label for="filter-partner-status" class="form-label small fw-bold mb-1">Trạng thái Napas</label>
+                                    <select id="filter-partner-status" class="form-select form-select-sm" onchange="applyTransactionFilters()">
+                                        <option value="">Tất cả</option>
+                                    </select>
+                                </div>
+                                <div class="col-12 col-md-3 d-grid">
+                                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="clearTransactionFilters()">Xóa lọc</button>
+                                </div>
+                                <div class="col-12 small text-muted" id="transaction-count" aria-live="polite"></div>
+                            </div>
+                        </div>
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-hover align-middle m-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th>Mã Giao Dịch</th>
+                                            <th>Tiền Core</th>
+                                            <th>Tiền Napas</th>
+                                            <th>Trạng Thái Core</th>
+                                            <th>Trạng Thái Napas</th>
+                                            <th>Phân Loại Lỗi</th>
+                                            <th class="text-center">Hành Động</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="anomalies-table-body"></tbody>
+                                </table>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center gap-2 p-3 border-top">
+                                <button type="button" id="transactions-prev" class="btn btn-outline-secondary btn-sm" onclick="changeTransactionPage(-1)">Trang trước</button>
+                                <span id="transactions-page" class="small text-muted"></span>
+                                <button type="button" id="transactions-next" class="btn btn-outline-secondary btn-sm" onclick="changeTransactionPage(1)">Trang sau</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 2: VẾT KIỂM TOÁN (AUDIT LOGS) -->
+                <div class="tab-pane fade" id="audit-pane">
+                    <div class="card border-0 shadow-sm">
+                        <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                            <h5 class="m-0 text-primary fw-bold"><i class="bi bi-shield-lock-fill me-2"></i>Nhật Ký Thao Tác Cán Bộ IT Support</h5>
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn btn-outline-success btn-sm" onclick="downloadAuditReport()">
+                                    <i class="bi bi-file-earmark-spreadsheet me-1"></i> Xuất báo cáo CSV
+                                </button>
+                                <button class="btn btn-outline-primary btn-sm" onclick="loadAuditLogs()"><i class="bi bi-arrow-clockwise me-1"></i> Cập nhật</button>
+                            </div>
+                        </div>
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-striped align-middle m-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th>Mã Log</th>
+                                            <th>Mã Giao Dịch</th>
+                                            <th>Hành Động</th>
+                                            <th>Mã Điện Napas</th>
+                                            <th>Lý Do Điều Chỉnh</th>
+                                            <th>Cán Bộ Thao Tác</th>
+                                            <th>Thời Gian</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="audit-table-body"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- FOOTER CHÂN TRANG CHUẨN AGRIBANK -->
+    <footer class="footer-agribank pt-4 pb-4 mt-auto">
+        <div class="container-fluid px-4">
+            <!-- Hàng Logo Header Chân Trang -->
+            <div class="d-flex justify-content-between align-items-center pb-3 border-bottom border-white border-opacity-25 mb-4">
+                <div class="d-flex align-items-center gap-3">
+                    <a href="https://www.agribank.com.vn/" target="_blank">
+                        <img src="/static/logo.png" alt="Agribank Logo" height="38" class="rounded" style="object-fit: cover;">
+                    </a>
+                    <span class="fs-6 fw-normal">Ngân hàng Nông nghiệp và Phát triển Nông thôn Việt Nam</span>
+                </div>
+            </div>
+
+            <!-- Nội dung Chân Trang 3 Cột -->
+            <div class="row g-4">
+                <!-- Cột 1: Thông tin Hội sở & Hotline -->
+                <div class="col-md-5">
+                    <div class="d-flex gap-3 align-items-start">
+                        <div class="footer-icon-circle flex-shrink-0 mt-1">
+                            <i class="bi bi-headset fs-5"></i>
+                        </div>
+                        <div>
+                            <p class="fw-bold fs-6 mb-2">Hội sở: Số 2 Láng Hạ, phường Giảng Võ, thành phố Hà Nội</p>
+                            <p class="mb-1 text-white-50">Sdt tiếp nhận: <span class="text-white">1900558818 / 024.3205.3205</span> để nhận được hỗ trợ</p>
+                            <p class="mb-1 text-white-50">Sdt gọi ra: <span class="text-white">024.2233.2345 / 037.353.2345 / 037.348.2345 / 037.346.2345</span></p>
+                            <p class="mb-1 text-white-50">Email: <span class="text-white">cskh@agribank.com.vn</span></p>
+                            <p class="mb-3 text-white-50">Swift Code: <span class="text-white">VBAAVNVX</span></p>
+                            <a href="https://www.agribank.com.vn/vn/lien-he" target="_blank" class="fw-bold d-inline-flex align-items-center">
+                                Liên hệ ngay <i class="bi bi-chevron-right ms-1"></i>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Cột 2: Yêu cầu tư vấn -->
+                <div class="col-md-4">
+                    <div class="d-flex gap-3 align-items-start">
+                        <div class="footer-icon-circle flex-shrink-0 mt-1">
+                            <i class="bi bi-chat-left-text fs-6"></i>
+                        </div>
+                        <div>
+                            <p class="fw-bold fs-6 mb-2">Yêu cầu tư vấn</p>
+                            <p class="text-white-50 mb-3">Để lại nhu cầu của bạn và Agribank sẽ liên hệ lại trong khoảng thời gian sớm nhất</p>
+                            <a href="https://www.agribank.com.vn/vn/lien-he" target="_blank" class="fw-bold d-inline-flex align-items-center">
+                                Yêu cầu tư vấn <i class="bi bi-chevron-right ms-1"></i>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- MODAL ĐĂNG NHẬP CÁN BỘ IT -->
+    <div class="modal fade" id="loginModal" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header navbar-agribank text-white">
+                    <h5 class="modal-title fw-bold"><i class="bi bi-shield-lock me-2"></i>Đăng Nhập Cán Bộ Vận Hành IT</h5>
+                </div>
+                <div class="modal-body p-4">
+                    <form id="loginForm" onsubmit="handleLogin(event)">
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">Họ & Tên Cán Bộ / Mã NV:</label>
+                            <input type="text" class="form-control" id="login-username" placeholder="Tên đăng nhập" autocomplete="username" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">Mật khẩu:</label>
+                            <input type="password" class="form-control" id="login-password" autocomplete="current-password" required>
+                        </div>
+                        <button type="submit" class="btn btn-danger w-100 fw-bold py-2 mt-2">Vào Hệ Thống Tra Soát</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL XỬ LÝ LỆCH -->
+    <div class="modal fade" id="resolveModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title"><i class="bi bi-shield-check me-2"></i>Xử Lý Giao Dịch Lệch</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="resolveForm">
+                        <input type="hidden" id="modal-trans-id">
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">Mã Giao Dịch:</label>
+                            <input type="text" class="form-control" id="display-trans-id" disabled>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">Hình thức xử lý:</label>
+                            <select class="form-select" id="modal-action-type">
+                                <option value="FORCE_SUCCESS">Ép Thành Công (Force Success - Giữ khoản trừ)</option>
+                                <option value="REFUND">Hoàn Tiền / Đảo Giao Dịch (Reversal / Refund)</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-bold text-danger">Mã điện tra soát Napas (*):</label>
+                            <input type="text" class="form-control" id="modal-napas-ref" placeholder="Ví dụ: NP-20261005-9988" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-bold text-danger">Lý do điều chỉnh / Ghi chú (*):</label>
+                            <textarea class="form-control" id="modal-reason" rows="3" placeholder="Đã đối soát Portal Napas..." required></textarea>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
+                    <button type="button" class="btn btn-danger" onclick="submitResolve()">Xác Nhận Xử Lý & Lưu Audit Log</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const API_URL = '/api';
+        let resolveModal, loginModal;
+        let barChartInstance = null, pieChartInstance = null;
+        let allTransactions = [], filteredTransactions = [], currentTransactionPage = 1;
+        let accessToken = sessionStorage.getItem('agribank_access_token') || '';
+        const TRANSACTIONS_PER_PAGE = 100;
+
+        async function apiFetch(url, options = {}) {
+            const headers = new Headers(options.headers || {});
+            if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
+            const response = await fetch(url, { ...options, headers, cache: options.cache || 'no-store' });
+            if (response.status === 401 && accessToken) {
+                accessToken = '';
+                sessionStorage.removeItem('agribank_access_token');
+                sessionStorage.removeItem('agribank_user');
+                loginModal?.show();
+            }
+            return response;
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            resolveModal = new bootstrap.Modal(document.getElementById('resolveModal'));
+            loginModal = new bootstrap.Modal(document.getElementById('loginModal'));
+            
+            checkAuth();
+        });
+
+        function checkAuth() {
+            const user = sessionStorage.getItem('agribank_user');
+            if (!accessToken) {
+                loginModal.show();
+            } else {
+                document.getElementById('current-user-display').textContent = user || 'Cán bộ IT';
+                loadData().catch(error => console.error('Không tải được dữ liệu:', error));
+            }
+        }
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            const username = document.getElementById('login-username').value.trim();
+            const password = document.getElementById('login-password').value;
+            try {
+                const response = await fetch(`${API_URL}/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password }),
+                    cache: 'no-store'
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.detail || 'Đăng nhập thất bại.');
+                accessToken = result.access_token;
+                sessionStorage.setItem('agribank_access_token', accessToken);
+                sessionStorage.setItem('agribank_user', result.username);
+                document.getElementById('current-user-display').textContent = result.username;
+                document.getElementById('login-password').value = '';
+                loginModal.hide();
+                await loadData();
+            } catch (error) {
+                alert(error.message);
+            }
+        }
+
+        function logout() {
+            accessToken = '';
+            sessionStorage.removeItem('agribank_access_token');
+            sessionStorage.removeItem('agribank_user');
+            location.reload();
+        }
+
+        async function loadData() {
+            const resStats = await apiFetch(`${API_URL}/stats`);
+            if (!resStats.ok) throw new Error('Không tải được thống kê giao dịch.');
+            const dataStats = await resStats.json();
+            const stats = dataStats.data;
+            
+            const matched = stats.MATCHED || 0;
+            const amtMismatch = stats.AMOUNT_MISMATCH || 0;
+            const sttMismatch = stats.STATUS_MISMATCH || 0;
+            const missCore = stats.MISSING_IN_CORE || 0;
+            const missPartner = stats.MISSING_IN_PARTNER || 0;
+            const missingTotal = missCore + missPartner;
+
+            document.getElementById('stat-matched').innerText = matched.toLocaleString();
+            document.getElementById('stat-amount-mismatch').innerText = amtMismatch.toLocaleString();
+            document.getElementById('stat-status-mismatch').innerText = sttMismatch.toLocaleString();
+            document.getElementById('stat-missing').innerText = missingTotal.toLocaleString();
+
+            renderCharts(matched, amtMismatch, sttMismatch, missCore, missPartner);
+
+            const resTransactions = await apiFetch(`${API_URL}/anomalies`);
+            if (!resTransactions.ok) throw new Error('Không tải được danh sách giao dịch cần xử lý.');
+            const transactionData = await resTransactions.json();
+            allTransactions = (transactionData.data || []).filter(item =>
+                item.recon_status !== 'MATCHED' && Number(item.resolved) !== 1
+            );
+            populateStatusFilters();
+            applyTransactionFilters();
+        }
+
+        function populateStatusFilters() {
+            [
+                { id: 'filter-core-status', key: 'core_status' },
+                { id: 'filter-partner-status', key: 'partner_status' }
+            ].forEach(({ id, key }) => {
+                const select = document.getElementById(id);
+                const previousValue = select.value;
+                const statuses = [...new Set(allTransactions.map(item => item[key] || 'N/A'))]
+                    .sort((a, b) => a.localeCompare(b));
+                select.replaceChildren(new Option('Tất cả', ''));
+                statuses.forEach(status => {
+                    select.add(new Option(status === 'N/A' ? 'Không có dữ liệu' : status, status));
+                });
+                if (statuses.includes(previousValue)) select.value = previousValue;
+            });
+        }
+
+        function applyTransactionFilters() {
+            const search = document.getElementById('filter-trans-id').value.trim().toLowerCase();
+            const reconStatus = document.getElementById('filter-recon-status').value;
+            const coreStatus = document.getElementById('filter-core-status').value;
+            const partnerStatus = document.getElementById('filter-partner-status').value;
+            filteredTransactions = allTransactions.filter(item => {
+                const itemCoreStatus = item.core_status || 'N/A';
+                const itemPartnerStatus = item.partner_status || 'N/A';
+                return (!search || String(item.trans_id).toLowerCase().includes(search))
+                    && (!reconStatus || item.recon_status === reconStatus)
+                    && (!coreStatus || itemCoreStatus === coreStatus)
+                    && (!partnerStatus || itemPartnerStatus === partnerStatus);
+            });
+            currentTransactionPage = 1;
+            renderTransactionsPage();
+        }
+
+        function clearTransactionFilters() {
+            ['filter-trans-id', 'filter-recon-status', 'filter-core-status', 'filter-partner-status']
+                .forEach(id => { document.getElementById(id).value = ''; });
+            applyTransactionFilters();
+        }
+
+        function changeTransactionPage(offset) {
+            const pageCount = Math.max(1, Math.ceil(filteredTransactions.length / TRANSACTIONS_PER_PAGE));
+            currentTransactionPage = Math.min(pageCount, Math.max(1, currentTransactionPage + offset));
+            renderTransactionsPage();
+        }
+
+        function renderTransactionsPage() {
+            const tbody = document.getElementById('anomalies-table-body');
+            tbody.replaceChildren();
+            const start = (currentTransactionPage - 1) * TRANSACTIONS_PER_PAGE;
+            const pageItems = filteredTransactions.slice(start, start + TRANSACTIONS_PER_PAGE);
+
+            pageItems.forEach(item => {
+                const tr = document.createElement('tr');
+                const addCell = (value, className = '') => {
+                    const td = document.createElement('td');
+                    td.textContent = value;
+                    if (className) td.className = className;
+                    tr.appendChild(td);
+                    return td;
+                };
+                addCell(item.trans_id, 'fw-bold');
+                addCell(item.core_amount == null ? 'N/A' : `${Number(item.core_amount).toLocaleString()} ₫`);
+                addCell(item.partner_amount == null ? 'N/A' : `${Number(item.partner_amount).toLocaleString()} ₫`);
+
+                const addStatus = value => {
+                    const td = document.createElement('td');
+                    const badge = document.createElement('span');
+                    badge.className = `badge bg-${value === 'SUCCESS' ? 'success' : value === 'N/A' ? 'secondary' : 'warning'}`;
+                    badge.textContent = value || 'N/A';
+                    td.appendChild(badge);
+                    tr.appendChild(td);
+                };
+                addStatus(item.core_status || 'N/A');
+                addStatus(item.partner_status || 'N/A');
+
+                const statusCell = document.createElement('td');
+                const statusBadge = document.createElement('span');
+                statusBadge.className = 'badge bg-danger';
+                statusBadge.textContent = item.recon_status;
+                statusCell.appendChild(statusBadge);
+                tr.appendChild(statusCell);
+
+                const actionCell = addCell('', 'text-center');
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'btn btn-sm btn-danger';
+                button.innerHTML = '<i class="bi bi-tools me-1"></i> Xử lý';
+                button.addEventListener('click', () => openResolveModal(item.trans_id));
+                actionCell.appendChild(button);
+                tbody.appendChild(tr);
+            });
+
+            const pageCount = Math.max(1, Math.ceil(filteredTransactions.length / TRANSACTIONS_PER_PAGE));
+            document.getElementById('transaction-count').textContent = `Hiển thị ${filteredTransactions.length ? start + 1 : 0}–${Math.min(start + pageItems.length, filteredTransactions.length)} / ${filteredTransactions.length.toLocaleString()} giao dịch phù hợp (tổng ${allTransactions.length.toLocaleString()} giao dịch cần xử lý)`;
+            document.getElementById('transactions-page').textContent = `Trang ${currentTransactionPage} / ${pageCount}`;
+            document.getElementById('transactions-prev').disabled = currentTransactionPage <= 1;
+            document.getElementById('transactions-next').disabled = currentTransactionPage >= pageCount;
+        }
+
+        async function restoreInitialData() {
+            const button = document.getElementById('restore-initial-button');
+            if (button) button.disabled = true;
+            try {
+                const response = await apiFetch(`${API_URL}/restore-baseline`, { method: 'POST' });
+                const result = await response.json();
+                if (!response.ok || result.status !== 'success') {
+                    throw new Error(result.detail || result.message || 'Không khôi phục được danh sách ban đầu.');
+                }
+                clearTransactionFilters();
+                await loadData();
+            } catch (error) {
+                alert(`Lỗi khôi phục dữ liệu: ${error.message}`);
+            } finally {
+                if (button) button.disabled = false;
+            }
+        }
+
+        function renderCharts(matched, amtMismatch, sttMismatch, missCore, missPartner) {
+            const ctxBar = document.getElementById('barChart').getContext('2d');
+            if (barChartInstance) barChartInstance.destroy();
+            barChartInstance = new Chart(ctxBar, {
+                type: 'bar',
+                data: {
+                    labels: ['Lệch Tiền', 'Lệch Trạng Thái', 'Mất Vết Core', 'Mất Vết Napas'],
+                    datasets: [{
+                        label: 'Số lượng giao dịch lệch',
+                        data: [amtMismatch, sttMismatch, missCore, missPartner],
+                        backgroundColor: ['#ffc107', '#dc3545', '#0d6efd', '#6c757d']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: { y: { beginAtZero: true } }
+                }
+            });
+
+            const ctxPie = document.getElementById('pieChart').getContext('2d');
+            if (pieChartInstance) pieChartInstance.destroy();
+            pieChartInstance = new Chart(ctxPie, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Lệch Tiền', 'Lệch Trạng Thái', 'Mất Vết Core', 'Mất Vết Napas'],
+                    datasets: [{
+                        data: [amtMismatch, sttMismatch, missCore, missPartner],
+                        backgroundColor: ['#ffc107', '#dc3545', '#0d6efd', '#6c757d']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'right' } }
+                }
+            });
+        }
+
+        async function loadAuditLogs() {
+            const res = await apiFetch(`${API_URL}/audit-logs`);
+            if (!res.ok) throw new Error('Không tải được nhật ký kiểm toán.');
+            const data = await res.json();
+            const tbody = document.getElementById('audit-table-body');
+            tbody.replaceChildren();
+
+            data.data.forEach(log => {
+                const tr = document.createElement('tr');
+                const addCell = (value, className = '') => {
+                    const td = document.createElement('td');
+                    td.textContent = value == null ? '' : String(value);
+                    if (className) td.className = className;
+                    tr.appendChild(td);
+                    return td;
+                };
+                addCell(`#${log.log_id}`);
+                addCell(log.trans_id, 'fw-bold');
+                const actionCell = addCell('');
+                const badge = document.createElement('span');
+                badge.className = `badge bg-${log.action_type === 'FORCE_SUCCESS' ? 'success' : 'warning'}`;
+                badge.textContent = log.action_type;
+                actionCell.appendChild(badge);
+                addCell(log.napas_ref_code, 'text-primary');
+                addCell(log.reason);
+                addCell(log.performed_by, 'fw-bold text-dark');
+                addCell(log.created_at, 'text-muted small');
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function downloadAuditReport() {
+            try {
+                const response = await apiFetch(`${API_URL}/reports/resolved.csv`);
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Không xuất được báo cáo.');
+                }
+                const blob = await response.blob();
+                const downloadUrl = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = downloadUrl;
+                link.download = `bao_cao_tra_soat_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+            } catch (error) {
+                alert(error.message);
+            }
+        }
+
+        function openResolveModal(transId) {
+            document.getElementById('modal-trans-id').value = transId;
+            document.getElementById('display-trans-id').value = transId;
+            document.getElementById('modal-napas-ref').value = '';
+            document.getElementById('modal-reason').value = '';
+            resolveModal.show();
+        }
+        async function submitUploadLogs() {
+            const coreFileInput = document.getElementById('coreFile');
+            const partnerFileInput = document.getElementById('partnerFile');
+            const alertBox = document.getElementById('uploadAlert');
+
+            if (!coreFileInput.files[0] || !partnerFileInput.files[0]) {
+                alert('Vui lòng chọn đủ 2 file Core Log và Partner Log!');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('core_file', coreFileInput.files[0]);
+            formData.append('partner_file', partnerFileInput.files[0]);
+
+            alertBox.classList.remove('d-none');
+
+            try {
+                const response = await apiFetch('/api/upload-and-reconcile', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+
+                if (result.status === 'success') {
+                    alert('Đối soát hoàn tất thành công!');
+                    // Đóng modal
+                    const modalElement = document.getElementById('uploadModal');
+                    const modal = bootstrap.Modal.getInstance(modalElement);
+                    modal.hide();
+                    // Tải lại dữ liệu mới lên Dashboard
+                    clearTransactionFilters();
+                    await loadData();
+                } else {
+                    alert('Có lỗi xảy ra: ' + (result.detail || result.message || response.statusText));
+                }
+            } catch (error) {
+                console.error('Lỗi upload:', error);
+                alert('Lỗi kết nối máy chủ!');
+            } finally {
+                alertBox.classList.add('d-none');
+            }
+        }
+        async function submitResolve() {
+            const trans_id = document.getElementById('modal-trans-id').value;
+            const action_type = document.getElementById('modal-action-type').value;
+            const napas_ref_code = document.getElementById('modal-napas-ref').value;
+            const reason = document.getElementById('modal-reason').value;
+
+            if (!napas_ref_code.trim() || !reason.trim()) {
+                alert('⚠️ Bắt buộc phải nhập Mã điện Napas và Lý do điều chỉnh!');
+                return;
+            }
+
+            const res = await apiFetch(`${API_URL}/resolve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    trans_id,
+                    action_type,
+                    napas_ref_code,
+                    reason
+                })
+            });
+
+            if (res.ok) {
+                alert('✅ Xử lý giao dịch thành công!');
+                resolveModal.hide();
+                loadData();
+            } else {
+                const err = await res.json();
+                alert('❌ Lỗi: ' + err.detail);
+            }
+        }
+    </script>
+        <!-- Modal Upload File Log -->
+    <div class="modal fade" id="uploadModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title fw-bold"><i class="bi bi-file-earmark-arrow-up me-2"></i>Tải Lên File Log Đối Soát</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="uploadForm">
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">1. File Core Log (Agribank)</label>
+                            <input type="file" class="form-control" id="coreFile" accept=".csv" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">2. File Partner Log (Napas/Đối tác)</label>
+                            <input type="file" class="form-control" id="partnerFile" accept=".csv" required>
+                        </div>
+                        <div id="uploadAlert" class="alert alert-info d-none text-center">
+                            Đang xử lý đối soát dữ liệu, vui lòng chờ...
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
+                    <button type="button" class="btn btn-danger fw-bold" onclick="submitUploadLogs()">Thực Hiện Đối Soát</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

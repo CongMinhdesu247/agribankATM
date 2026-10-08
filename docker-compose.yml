@@ -1,0 +1,16 @@
+services:
+  agribank-review:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////data/agribank_recon.db
+      UPLOAD_DIR: /data/uploads
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - agribank_data:/data
+    restart: unless-stopped
+
+volumes:
+  agribank_data:
+
