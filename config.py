@@ -18,8 +18,22 @@ def load_env_file(path: Path = BASE_DIR / ".env") -> None:
 load_env_file()
 
 
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./agribank_recon.db").strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+elif DATABASE_URL.startswith("postgresql+psycopg://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgresql+psycopg://"):]
+
+if DATABASE_URL.startswith("sqlite:///"):
+    DATABASE_KIND = "sqlite"
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_KIND = "postgresql"
+else:
+    raise RuntimeError("DATABASE_URL must use sqlite:/// or postgresql://.")
+
+
 def get_sqlite_path(database_url: str | None = None) -> Path:
-    url = database_url or os.getenv("DATABASE_URL", "sqlite:///./agribank_recon.db")
+    url = database_url or DATABASE_URL
     prefix = "sqlite:///"
     if not url.startswith(prefix):
         raise RuntimeError("Only SQLite DATABASE_URL values are supported by this deployment.")
@@ -28,7 +42,7 @@ def get_sqlite_path(database_url: str | None = None) -> Path:
     return path.resolve() if path.is_absolute() else (BASE_DIR / path).resolve()
 
 
-DB_PATH = get_sqlite_path()
+DB_PATH = get_sqlite_path() if DATABASE_KIND == "sqlite" else None
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 APP_USERNAME = os.getenv("APP_USERNAME", "")
 APP_PASSWORD_HASH = os.getenv("APP_PASSWORD_HASH", "")

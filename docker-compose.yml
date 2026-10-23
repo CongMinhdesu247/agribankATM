@@ -5,7 +5,7 @@ services:
     # The entrypoint prepares the mounted volume, then drops privileges to appuser.
     user: "0:0"
     environment:
-      DATABASE_URL: sqlite:////data/agribank_recon.db
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/agribank_recon.db}
       UPLOAD_DIR: /data/uploads
     ports:
       - "127.0.0.1:8000:8000"

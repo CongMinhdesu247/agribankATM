@@ -18,9 +18,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-import sqlite3
 import config
 import reconcile_engine
+from database import connect_database, get_table_columns, is_integrity_error
 from request_limits import RequestBodyLimitMiddleware
 from security import create_access_token, hash_password, verify_access_token, verify_password
 
@@ -120,7 +120,7 @@ def current_user(
     conn = get_db_connection()
     try:
         user = conn.execute(
-            "SELECT username, role, is_active FROM app_users WHERE username = ? COLLATE NOCASE", (username,)
+            "SELECT username, role, is_active FROM app_users WHERE LOWER(username) = LOWER(?)", (username,)
         ).fetchone()
     finally:
         conn.close()
@@ -147,7 +147,7 @@ def list_users(_user=Depends(require_role("admin"))):
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT username, role, is_active, created_at, created_by FROM app_users ORDER BY username COLLATE NOCASE"
+            "SELECT username, role, is_active, created_at, created_by FROM app_users ORDER BY LOWER(username)"
         ).fetchall()
     finally:
         conn.close()
@@ -164,8 +164,10 @@ def create_user(req: UserCreateRequest, user=Depends(require_role("admin"))):
         """, (req.username, hash_password(req.password), req.role,
               datetime.now().astimezone().isoformat(timespec="seconds"), user["username"]))
         conn.commit()
-    except sqlite3.IntegrityError as error:
-        raise HTTPException(status_code=409, detail="Username already exists") from error
+    except Exception as error:
+        if is_integrity_error(error):
+            raise HTTPException(status_code=409, detail="Username already exists") from error
+        raise
     finally:
         conn.close()
     return {"status": "success", "username": req.username, "role": req.role}
@@ -177,7 +179,7 @@ def set_user_active(username: str, req: UserActiveRequest, user=Depends(require_
     try:
         conn.execute("BEGIN IMMEDIATE")
         target = conn.execute(
-            "SELECT username, role, is_active FROM app_users WHERE username = ? COLLATE NOCASE", (username,)
+            "SELECT username, role, is_active FROM app_users WHERE LOWER(username) = LOWER(?)", (username,)
         ).fetchone()
         if target is None:
             raise HTTPException(status_code=404, detail="User not found")
@@ -189,7 +191,7 @@ def set_user_active(username: str, req: UserActiveRequest, user=Depends(require_
             ).fetchone()[0]
             if active_admins <= 1:
                 raise HTTPException(status_code=409, detail="At least one active administrator is required")
-        conn.execute("UPDATE app_users SET is_active = ? WHERE username = ? COLLATE NOCASE",
+        conn.execute("UPDATE app_users SET is_active = ? WHERE LOWER(username) = LOWER(?)",
                      (int(req.is_active), username))
         conn.commit()
     finally:
@@ -222,7 +224,7 @@ def login(req: LoginRequest, request: Request, response: Response):
             logger.warning("login_rejected request_id=%s reason=throttled", request.state.request_id)
             raise HTTPException(status_code=429, detail="Too many failed login attempts; try again later")
         user = conn.execute(
-            "SELECT username, password_hash, role, is_active FROM app_users WHERE username = ? COLLATE NOCASE",
+            "SELECT username, password_hash, role, is_active FROM app_users WHERE LOWER(username) = LOWER(?)",
             (req.username.strip(),),
         ).fetchone()
         password_ok = verify_password(req.password, user["password_hash"] if user else config.APP_PASSWORD_HASH)
@@ -269,11 +271,7 @@ def read_root():
     )
 
 def get_db_connection():
-    # Sửa 'reconciliation.db' thành 'agribank_recon.db'
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    return connect_database(DB_PATH)
 
 
 seed_admin_user()
@@ -289,7 +287,7 @@ def health_ready():
     conn = get_db_connection()
     try:
         conn.execute("SELECT 1").fetchone()
-    except sqlite3.Error as error:
+    except Exception as error:
         logger.exception("Readiness check failed")
         raise HTTPException(status_code=503, detail="Database is not ready") from error
     finally:
@@ -297,7 +295,7 @@ def health_ready():
     return {"status": "ready"}
 
 def ensure_audit_report_columns(conn):
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_logs)")}
+    columns = get_table_columns(conn, "audit_logs")
     snapshot_columns = {
         "core_amount": "REAL",
         "partner_amount": "REAL",
@@ -566,11 +564,11 @@ def decide_audit_log(log_id: int, req: AuditDecisionRequest, user=Depends(requir
             WHERE log_id = ? AND review_status = 'PENDING'
         """, (decision, user["username"], req.comment.strip(), log_id))
         if req.decision == "APPROVE":
-            conn.execute("""
+            updated = conn.execute("""
                 UPDATE reconciliation_results SET resolved = 1
                 WHERE trans_id = ? AND run_id IS ? AND resolved = 0
             """, (audit["trans_id"], audit["run_id"]))
-            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+            if updated.rowcount != 1:
                 raise HTTPException(status_code=409, detail="Transaction is no longer awaiting resolution")
         conn.commit()
     except HTTPException:

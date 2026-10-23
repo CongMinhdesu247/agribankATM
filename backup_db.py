@@ -6,13 +6,15 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 
-from config import DB_PATH, BASE_DIR
+from config import DB_PATH, BASE_DIR, DATABASE_KIND
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create a consistent SQLite backup.")
     parser.add_argument("--output-dir", default=str(BASE_DIR / "backups"))
     args = parser.parse_args()
+    if DATABASE_KIND != "sqlite":
+        raise SystemExit("This utility backs up SQLite only. Use managed PostgreSQL backups or pg_dump.")
     if not DB_PATH.is_file():
         raise SystemExit(f"Database does not exist: {DB_PATH}")
 
