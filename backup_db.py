@@ -1,7 +1,10 @@
 import argparse
+import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+import tempfile
 
 from config import DB_PATH, BASE_DIR
 
@@ -15,9 +18,20 @@ def main() -> None:
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = output_dir / f"agribank_recon_{datetime.now():%Y%m%d_%H%M%S}.db"
-    with sqlite3.connect(DB_PATH) as source, sqlite3.connect(backup_path) as destination:
-        source.backup(destination)
+    backup_path = output_dir / f"agribank_recon_{datetime.now():%Y%m%d_%H%M%S_%f}.db"
+    file_descriptor, temporary_name = tempfile.mkstemp(prefix=".agribank_backup_", suffix=".tmp", dir=output_dir)
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        with closing(sqlite3.connect(DB_PATH)) as source, closing(sqlite3.connect(temporary_path)) as destination:
+            source.backup(destination)
+            destination.commit()
+            result = destination.execute("PRAGMA integrity_check").fetchone()
+            if result is None or result[0] != "ok":
+                raise RuntimeError("SQLite backup failed its integrity check")
+        os.replace(temporary_path, backup_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     print(f"Backup saved: {backup_path}")
 
 

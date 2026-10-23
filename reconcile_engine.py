@@ -1,4 +1,8 @@
 import sqlite3
+import uuid
+from contextlib import closing
+from decimal import Decimal, InvalidOperation
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -7,11 +11,30 @@ from config import BASE_DIR, DB_PATH
 
 CORE_LOG_PATH = BASE_DIR / "core_log.csv"
 PARTNER_LOG_PATH = BASE_DIR / "partner_log.csv"
+MAX_SAFE_VND = 9_007_199_254_740_991
+
+
+def normalize_vnd_amounts(values: pd.Series, label: str) -> pd.Series:
+    amounts: list[int] = []
+    for value in values.tolist():
+        raw_value = str(value).strip()
+        if len(raw_value) > 32:
+            raise ValueError(f"{label} amounts must be whole non-negative VND values")
+        try:
+            amount = Decimal(raw_value)
+        except (InvalidOperation, ValueError):
+            raise ValueError(f"{label} amounts must be whole non-negative VND values")
+        if (not amount.is_finite() or amount < 0 or amount != amount.to_integral_value()
+                or amount > MAX_SAFE_VND):
+            raise ValueError(f"{label} amounts must be whole non-negative VND values no larger than {MAX_SAFE_VND:,}")
+        amounts.append(int(amount))
+    return pd.Series(amounts, index=values.index, dtype="int64")
 
 
 def initialize_database() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH, timeout=30) as conn:
+    with closing(sqlite3.connect(DB_PATH, timeout=30)) as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript("""
@@ -24,7 +47,29 @@ def initialize_database() -> None:
                 partner_status TEXT,
                 recon_status TEXT NOT NULL,
                 resolved INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                run_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS reconciliation_runs (
+                run_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                performed_by TEXT NOT NULL,
+                core_filename TEXT NOT NULL,
+                partner_filename TEXT NOT NULL,
+                transaction_count INTEGER NOT NULL,
+                matched_count INTEGER NOT NULL,
+                discrepancy_count INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS reconciliation_run_results (
+                run_id TEXT NOT NULL,
+                trans_id TEXT NOT NULL,
+                core_amount REAL,
+                partner_amount REAL,
+                core_status TEXT,
+                partner_status TEXT,
+                recon_status TEXT NOT NULL,
+                PRIMARY KEY (run_id, trans_id),
+                FOREIGN KEY (run_id) REFERENCES reconciliation_runs(run_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS audit_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,7 +83,12 @@ def initialize_database() -> None:
                 partner_amount REAL,
                 core_status TEXT,
                 partner_status TEXT,
-                recon_status TEXT
+                recon_status TEXT,
+                run_id TEXT,
+                review_status TEXT NOT NULL DEFAULT 'APPROVED',
+                approved_by TEXT,
+                approved_at TEXT,
+                approval_comment TEXT
             );
             CREATE TABLE IF NOT EXISTS reconciliation_baseline (
                 trans_id TEXT PRIMARY KEY,
@@ -50,12 +100,94 @@ def initialize_database() -> None:
                 resolved INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS reconciliation_baseline_state (
+                baseline_id INTEGER PRIMARY KEY CHECK (baseline_id = 1),
+                captured_at TEXT NOT NULL,
+                transaction_count INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS reconciliation_baseline_results (
+                trans_id TEXT PRIMARY KEY,
+                core_amount REAL,
+                partner_amount REAL,
+                core_status TEXT,
+                partner_status TEXT,
+                recon_status TEXT NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                run_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS app_users (
+                username TEXT PRIMARY KEY COLLATE NOCASE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('admin', 'operator', 'approver')),
+                is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                ip_hash TEXT NOT NULL,
+                attempted_at REAL NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_reconciliation_status_resolved
                 ON reconciliation_results (recon_status, resolved);
             CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at
                 ON audit_logs (created_at, log_id);
         """)
+        _ensure_column(conn, "reconciliation_results", "run_id", "TEXT")
+        _ensure_column(conn, "audit_logs", "run_id", "TEXT")
+        _ensure_column(conn, "audit_logs", "review_status", "TEXT NOT NULL DEFAULT 'APPROVED'")
+        _ensure_column(conn, "audit_logs", "approved_by", "TEXT")
+        _ensure_column(conn, "audit_logs", "approved_at", "TEXT")
+        _ensure_column(conn, "audit_logs", "approval_comment", "TEXT")
         _ensure_audit_snapshot_columns(conn)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_review_lookup
+            ON audit_logs (trans_id, run_id, review_status)
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time ON login_attempts (ip_hash, attempted_at)")
+        baseline_exists = conn.execute(
+            "SELECT 1 FROM reconciliation_baseline_state WHERE baseline_id = 1"
+        ).fetchone()
+        if baseline_exists is None:
+            legacy_rows = conn.execute("""
+                SELECT trans_id, core_amount, partner_amount, core_status, partner_status,
+                       recon_status, resolved, created_at
+                FROM reconciliation_baseline
+            """).fetchall()
+            snapshot_rows = legacy_rows
+            include_run_id = False
+            if not snapshot_rows:
+                # Older app versions populated an empty baseline from the active
+                # dataset. Preserve that behavior when migrating a populated DB.
+                snapshot_rows = conn.execute("""
+                    SELECT trans_id, core_amount, partner_amount, core_status, partner_status,
+                           recon_status, resolved, created_at, run_id
+                    FROM reconciliation_results
+                """).fetchall()
+                include_run_id = True
+            conn.execute("""
+                INSERT INTO reconciliation_baseline_state (baseline_id, captured_at, transaction_count)
+                VALUES (1, CURRENT_TIMESTAMP, ?)
+            """, (len(snapshot_rows),))
+            if snapshot_rows and include_run_id:
+                conn.executemany("""
+                    INSERT INTO reconciliation_baseline_results
+                        (trans_id, core_amount, partner_amount, core_status, partner_status,
+                         recon_status, resolved, created_at, run_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, snapshot_rows)
+            elif snapshot_rows:
+                conn.executemany("""
+                    INSERT INTO reconciliation_baseline_results
+                        (trans_id, core_amount, partner_amount, core_status, partner_status,
+                         recon_status, resolved, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, snapshot_rows)
+        conn.commit()
+def _ensure_column(conn: sqlite3.Connection, table: str, name: str, column_type: str) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if name not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {column_type}")
 
 
 def _ensure_audit_snapshot_columns(conn: sqlite3.Connection) -> None:
@@ -73,6 +205,10 @@ def _ensure_audit_snapshot_columns(conn: sqlite3.Connection) -> None:
 
 
 def build_reconciliation_rows(core: pd.DataFrame, partner: pd.DataFrame) -> list[tuple]:
+    core = core.copy()
+    partner = partner.copy()
+    core["amount"] = normalize_vnd_amounts(core["amount"], "Core")
+    partner["amount"] = normalize_vnd_amounts(partner["amount"], "Partner")
     merged = pd.merge(core, partner, on="trans_id", how="outer", suffixes=("_core", "_partner"))
     if merged.empty:
         raise ValueError("The uploaded CSV files do not contain any transactions.")
@@ -99,8 +235,8 @@ def build_reconciliation_rows(core: pd.DataFrame, partner: pd.DataFrame) -> list
     return [
         (
             str(trans_id),
-            None if pd.isna(c_amount) else float(c_amount),
-            None if pd.isna(p_amount) else float(p_amount),
+            None if pd.isna(c_amount) else int(c_amount),
+            None if pd.isna(p_amount) else int(p_amount),
             nullable(c_status), nullable(p_status), str(status),
         )
         for trans_id, c_amount, p_amount, c_status, p_status, status in zip(
@@ -109,30 +245,78 @@ def build_reconciliation_rows(core: pd.DataFrame, partner: pd.DataFrame) -> list
     ]
 
 
-def replace_reconciliation_results(results: list[tuple]) -> None:
+def replace_reconciliation_results(
+    results: list[tuple], *, run_id: str | None = None, performed_by: str = "system",
+    core_filename: str = "core_log.csv", partner_filename: str = "partner_log.csv",
+    expected_current_run_id: str | None = None, enforce_expected: bool = False,
+) -> str:
     if not results:
         raise ValueError("No reconciliation results were produced.")
     initialize_database()
-    with sqlite3.connect(DB_PATH, timeout=30) as conn:
+    run_id = run_id or uuid.uuid4().hex
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    matched_count = sum(1 for row in results if row[5] == "MATCHED")
+    with closing(sqlite3.connect(DB_PATH, timeout=30)) as conn:
         try:
+            conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT run_id FROM reconciliation_results LIMIT 1").fetchone()
+            active_run_id = current[0] if current else None
+            if enforce_expected and active_run_id != expected_current_run_id:
+                raise ValueError("The active reconciliation changed after preview; preview the files again")
+            baseline = conn.execute("SELECT 1 FROM reconciliation_baseline_state WHERE baseline_id = 1").fetchone()
+            if baseline is None:
+                current = conn.execute("""
+                    SELECT trans_id, core_amount, partner_amount, core_status, partner_status,
+                           recon_status, resolved, created_at, run_id
+                    FROM reconciliation_results
+                """).fetchall()
+                conn.execute("""
+                    INSERT INTO reconciliation_baseline_state (baseline_id, captured_at, transaction_count)
+                    VALUES (1, ?, ?)
+                """, (created_at, len(current)))
+                conn.executemany("""
+                    INSERT INTO reconciliation_baseline_results
+                        (trans_id, core_amount, partner_amount, core_status, partner_status,
+                         recon_status, resolved, created_at, run_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, current)
+            conn.execute("""
+                INSERT INTO reconciliation_runs
+                    (run_id, created_at, performed_by, core_filename, partner_filename,
+                     transaction_count, matched_count, discrepancy_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (run_id, created_at, performed_by, core_filename, partner_filename,
+                  len(results), matched_count, len(results) - matched_count))
+            conn.execute("""
+                UPDATE audit_logs SET review_status = 'SUPERSEDED',
+                    approval_comment = 'Superseded by a newer reconciliation run'
+                WHERE review_status = 'PENDING'
+            """)
+            conn.executemany("""
+                INSERT INTO reconciliation_run_results
+                    (run_id, trans_id, core_amount, partner_amount, core_status, partner_status, recon_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [(run_id, *row) for row in results])
             conn.execute("DELETE FROM reconciliation_results")
             conn.executemany("""
                 INSERT INTO reconciliation_results
-                    (trans_id, core_amount, partner_amount, core_status, partner_status, recon_status)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, results)
+                    (trans_id, core_amount, partner_amount, core_status, partner_status, recon_status, run_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [(*row, run_id) for row in results])
             conn.commit()
         except Exception:
             conn.rollback()
             raise
+    return run_id
 
 
 def run_reconciliation(core_path: Path = CORE_LOG_PATH, partner_path: Path = PARTNER_LOG_PATH) -> None:
-    core = pd.read_csv(core_path, dtype={"trans_id": "string"})
-    partner = pd.read_csv(partner_path, dtype={"trans_id": "string"})
+    core = pd.read_csv(core_path, dtype={"trans_id": "string", "amount": "string"})
+    partner = pd.read_csv(partner_path, dtype={"trans_id": "string", "amount": "string"})
     rows = build_reconciliation_rows(core, partner)
-    replace_reconciliation_results(rows)
+    replace_reconciliation_results(rows, performed_by="system", core_filename=core_path.name,
+                                   partner_filename=partner_path.name)
     print(f"Reconciled {len(rows)} distinct transactions.")
 
 

@@ -1,4 +1,5 @@
 import getpass
+import os
 import secrets
 import re
 from pathlib import Path
@@ -39,6 +40,8 @@ def main() -> None:
     values.setdefault("UPLOAD_DIR", str(ENV_PATH.parent / "uploads"))
 
     ENV_PATH.write_text("".join(f"{key}={value}\n" for key, value in values.items()), encoding="utf-8")
+    if os.name == "posix":
+        ENV_PATH.chmod(0o600)
     print(f"Credentials saved to {ENV_PATH}. Keep this file private and do not commit it.")
 
 

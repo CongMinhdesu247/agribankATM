@@ -9,33 +9,138 @@
     <!-- Chart.js cho Biểu đồ -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { background-color: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; min-height: 100vh; }
-        .main-content { flex: 1; }
-        .navbar-agribank { background-color: #800000; }
-        .card-stat { border-radius: 10px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
-        .nav-tabs .nav-link.active { font-weight: bold; color: #800000; border-bottom: 3px solid #800000; }
-        .nav-tabs .nav-link { color: #555; }
-        .chart-container { position: relative; height: 260px; width: 100%; }
+        :root {
+            --brand: #800000;
+            --brand-dark: #680000;
+            --ink: #243044;
+            --muted: #687386;
+            --surface: #ffffff;
+            --page: #f5f7fa;
+            --line: #e5e9f0;
+            --radius: 14px;
+            --shadow: 0 5px 20px rgba(29, 41, 57, .055);
+        }
 
-        /* Style Chân trang Footer Agribank */
-        .footer-agribank { background-color: #a80022; color: #ffffff; font-size: 0.9rem; }
-        .footer-agribank a { color: #ffffff; text-decoration: none; }
-        .footer-agribank a:hover { text-decoration: underline; }
-        .footer-icon-circle { width: 36px; height: 36px; border: 1px solid rgba(255,255,255,0.6); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
-        .app-badge { height: 40px; border-radius: 5px; }
+        body {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background: var(--page);
+            color: var(--ink);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .main-content { flex: 1; }
+        .navbar-agribank { background: var(--brand); }
+        .app-navbar { min-height: 72px; padding: .8rem max(1rem, calc((100vw - 1600px) / 2)); }
+        .app-navbar .navbar-brand { white-space: normal; line-height: 1.35; }
+        .app-container { width: min(100% - 2rem, 1600px); margin-inline: auto; }
+        .page-heading { margin: .25rem 0 1.4rem; }
+        .page-heading h1 { margin: 0; font-size: clamp(1.35rem, 2vw, 1.75rem); font-weight: 700; letter-spacing: -.025em; }
+        .page-heading p { margin: .35rem 0 0; color: var(--muted); }
+
+        .card, .modal-content { border: 1px solid var(--line) !important; border-radius: var(--radius); box-shadow: var(--shadow) !important; }
+        .card-stat { height: 100%; padding: 1.15rem 1.25rem !important; transition: transform .16s ease, box-shadow .16s ease; }
+        .card-stat.border-success { border-left: 4px solid var(--bs-success) !important; }
+        .card-stat.border-warning { border-left: 4px solid var(--bs-warning) !important; }
+        .card-stat.border-danger { border-left: 4px solid var(--bs-danger) !important; }
+        .card-stat.border-secondary { border-left: 4px solid var(--bs-secondary) !important; }
+        .card-stat:hover { transform: translateY(-2px); box-shadow: 0 9px 24px rgba(29, 41, 57, .09) !important; }
+        .card-stat .text-muted { font-size: .72rem; font-weight: 700; letter-spacing: .055em; }
+        .card-stat .fs-3 { margin-top: .3rem; font-variant-numeric: tabular-nums; }
+        .chart-card { padding: 1.2rem 1.3rem !important; }
+        .chart-card h6 { min-height: 2.5rem; color: var(--ink) !important; }
+        .chart-container { position: relative; width: 100%; height: 245px; }
+
+        .nav-tabs { gap: .45rem; border-bottom: 1px solid var(--line); }
+        .nav-tabs .nav-link {
+            min-height: 44px;
+            padding: .7rem 1rem;
+            border: 1px solid transparent;
+            border-radius: 10px 10px 0 0;
+            color: #596579;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .nav-tabs .nav-link:hover { color: var(--brand); background: #fff8f8; }
+        .nav-tabs .nav-link.active { color: var(--brand); background: var(--surface); border-color: var(--line) var(--line) #fff; font-weight: 700; }
+
+        .card-header { display: flex; flex-wrap: wrap; gap: .9rem; padding: 1.1rem 1.25rem; border-bottom-color: var(--line); border-radius: var(--radius) var(--radius) 0 0 !important; }
+        .card-header h5 { color: var(--ink) !important; font-size: 1.05rem; line-height: 1.4; }
+        .card-header > .action-group { margin-left: auto; }
+        .card-body { padding: 1.25rem; }
+        .filter-panel { background: #fafbfc !important; }
+        .form-label { color: #49566a; font-weight: 600; }
+        .form-control, .form-select { min-height: 42px; border-color: #d9dfe8; border-radius: 9px; }
+        .form-control:focus, .form-select:focus { border-color: #bd7777; box-shadow: 0 0 0 .2rem rgba(128, 0, 0, .1); }
+        .btn { min-height: 40px; padding: .55rem .9rem; border-radius: 9px; font-weight: 600; transition: background-color .15s ease, border-color .15s ease, transform .15s ease; }
+        .btn:hover:not(:disabled) { transform: translateY(-1px); }
+        .btn-sm { min-height: 36px; padding: .42rem .75rem; }
+        .btn-danger { background: var(--brand); border-color: var(--brand); }
+        .btn-danger:hover, .btn-danger:focus { background: var(--brand-dark); border-color: var(--brand-dark); }
+        .action-group { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; }
+        .action-group .btn { white-space: nowrap; }
+
+        .table-responsive { border-radius: 0 0 var(--radius) var(--radius); }
+        .table { color: var(--ink); --bs-table-bg: transparent; }
+        .table > :not(caption) > * > * { padding: .9rem .85rem; border-bottom-color: var(--line); }
+        .table thead th { color: #5b6678; background: #f7f8fa; font-size: .76rem; font-weight: 700; letter-spacing: .035em; text-transform: uppercase; white-space: nowrap; }
+        .table tbody tr:last-child > * { border-bottom: 0; }
+        .table tbody tr:hover { --bs-table-bg: #fbf8f8; }
+        .table tbody td { vertical-align: middle; }
+        .table .btn + .btn { margin-left: .4rem; }
+        .empty-state { padding: 3rem 1rem !important; color: var(--muted); text-align: center; }
+        .badge { padding: .45em .7em; font-weight: 650; letter-spacing: .01em; }
+        .pagination-bar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 1rem 1.25rem; border-top: 1px solid var(--line); }
+        .pagination-bar .btn { min-width: 112px; }
+        .pagination-label { color: var(--muted); font-size: .875rem; text-align: center; }
+        .run-detail { margin: 1.25rem; padding: 1.25rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfd; }
+
+        .footer-agribank { margin-top: 2rem; padding: 1rem 0; color: var(--muted); font-size: .85rem; background: #fff; border-top: 1px solid var(--line); }
+        .modal-header, .modal-footer { padding: 1rem 1.25rem; }
+        .modal-body { padding: 1.35rem; }
+        .modal-footer { gap: .65rem; border-top-color: var(--line); }
+        :focus-visible { outline: 3px solid rgba(128, 0, 0, .32); outline-offset: 2px; }
+
+        @media (max-width: 991.98px) {
+            .app-navbar { gap: .75rem; }
+            .app-navbar .navbar-brand { font-size: 1rem !important; }
+        }
+        @media (max-width: 767.98px) {
+            .app-navbar { padding: .75rem 1rem; }
+            .app-navbar > .d-flex:first-child { min-width: 0; flex: 1 1 100%; }
+            .app-navbar .navbar-brand { font-size: .95rem !important; }
+            .app-navbar > .text-white { width: 100%; justify-content: space-between; gap: .5rem !important; font-size: .88rem; }
+            .app-container { width: min(100% - 1.25rem, 1600px); }
+            .page-heading { margin-top: .25rem; }
+            .chart-container { height: 220px; }
+            .nav-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: .25rem; }
+            .nav-tabs .nav-link { padding-inline: .75rem; font-size: .88rem; }
+            .card-header { align-items: stretch !important; flex-direction: column; gap: .9rem; }
+            .card-header > .action-group { margin-left: 0; }
+            .action-group { width: 100%; }
+            .action-group .btn { flex: 1 1 auto; }
+            .pagination-bar { padding: .85rem; }
+            .pagination-bar .btn { min-width: 0; }
+            .table > :not(caption) > * > * { padding: .75rem .65rem; }
+        }
+        @media (max-width: 420px) {
+            .action-group { flex-direction: column; align-items: stretch; }
+            .action-group .btn { width: 100%; }
+            .pagination-bar .btn { font-size: .8rem; padding-inline: .55rem; }
+        }
     </style>
 </head>
 <body>
 
     <div class="main-content">
         <!-- Header -->
-        <nav class="navbar navbar-dark navbar-agribank px-4 mb-4">
+        <nav class="navbar navbar-dark navbar-agribank app-navbar mb-4">
             <div class="d-flex align-items-center gap-3">
                 <!-- Logo Agribank click ra trang chủ -->
                 <a href="https://www.agribank.com.vn/" target="_blank" title="Trang chủ Agribank" class="d-flex align-items-center text-decoration-none">
                     <img src="/static/logo.png" alt="Agribank Logo" height="38" class="rounded me-2" style="object-fit: cover;">
                 </a>
-                <span class="navbar-brand fw-bold fs-5 m-0">AGRIBANK - HỆ THỐNG ĐỐI SOÁT & TRA SOÁT GIAO DỊCH</span>
+                <span class="navbar-brand fw-bold fs-5 m-0">AGRIBANK · ĐỐI SOÁT GIAO DỊCH</span>
             </div>
             <div class="text-white d-flex align-items-center gap-3">
                 <span><i class="bi bi-person-circle me-1"></i> Cán bộ: <strong id="current-user-display">Chưa đăng nhập</strong></span>
@@ -43,24 +148,28 @@
             </div>
         </nav>
 
-        <div class="container-fluid px-4 mb-5">
+        <div class="app-container mb-5">
+            <header class="page-heading">
+                <h1>Tổng quan đối soát</h1>
+                <p>Theo dõi giao dịch lệch, lịch sử xử lý và trạng thái phê duyệt.</p>
+            </header>
             <!-- Thống kê Dashboard Cards -->
             <div class="row g-3 mb-4">
                 <div class="col-md-3">
                     <div class="card card-stat bg-white p-3 border-start border-success border-4">
-                        <div class="text-muted small">GIAO DỊCH KHỚP (MATCHED)</div>
+                        <div class="text-muted small">GIAO DỊCH KHỚP</div>
                         <div class="fs-3 fw-bold text-success" id="stat-matched">0</div>
                     </div>
                 </div>
                 <div class="col-md-3">
                     <div class="card card-stat bg-white p-3 border-start border-warning border-4">
-                        <div class="text-muted small">LỆCH TIỀN (AMOUNT MISMATCH)</div>
+                        <div class="text-muted small">LỆCH TIỀN</div>
                         <div class="fs-3 fw-bold text-warning" id="stat-amount-mismatch">0</div>
                     </div>
                 </div>
                 <div class="col-md-3">
                     <div class="card card-stat bg-white p-3 border-start border-danger border-4">
-                        <div class="text-muted small">LỆCH TRẠNG THÁI / TREO</div>
+                        <div class="text-muted small">LỆCH TRẠNG THÁI</div>
                         <div class="fs-3 fw-bold text-danger" id="stat-status-mismatch">0</div>
                     </div>
                 </div>
@@ -75,16 +184,16 @@
             <!-- Khối Biểu Đồ Thống Kê (Charts) -->
             <div class="row g-3 mb-4">
                 <div class="col-md-7">
-                    <div class="card border-0 shadow-sm p-3">
-                        <h6 class="fw-bold text-secondary mb-3"><i class="bi bi-bar-chart-fill me-2 text-danger"></i>Thống Kê Chi Tiết Các Loại Giao Dịch Lệch (Anomalies)</h6>
+                    <div class="card chart-card">
+                        <h6 class="fw-bold text-secondary mb-3"><i class="bi bi-bar-chart-fill me-2 text-danger"></i>Số lượng giao dịch theo loại lệch</h6>
                         <div class="chart-container">
                             <canvas id="barChart"></canvas>
                         </div>
                     </div>
                 </div>
                 <div class="col-md-5">
-                    <div class="card border-0 shadow-sm p-3">
-                        <h6 class="fw-bold text-secondary mb-3"><i class="bi bi-pie-chart-fill me-2 text-warning"></i>Tỷ Lệ Phân Loại Các Giao Dịch Lệch</h6>
+                    <div class="card chart-card">
+                        <h6 class="fw-bold text-secondary mb-3"><i class="bi bi-pie-chart-fill me-2 text-warning"></i>Tỷ lệ giao dịch lệch</h6>
                         <div class="chart-container">
                             <canvas id="pieChart"></canvas>
                         </div>
@@ -96,12 +205,22 @@
             <ul class="nav nav-tabs mb-3" id="mainTab" role="tablist">
                 <li class="nav-item">
                     <button class="nav-link active" id="anomalies-tab" data-bs-toggle="tab" data-bs-target="#anomalies-pane" type="button">
-                        <i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>Giao Dịch Lệch Cần Xử Lý
+                        <i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>Giao dịch cần xử lý
                     </button>
                 </li>
                 <li class="nav-item">
                     <button class="nav-link" id="audit-tab" data-bs-toggle="tab" data-bs-target="#audit-pane" type="button" onclick="loadAuditLogs()">
-                        <i class="bi bi-journal-check text-primary me-2"></i>Lịch Sử Kiểm Toán (Audit Logs)
+                        <i class="bi bi-journal-check text-primary me-2"></i>Nhật ký kiểm toán
+                    </button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link" id="runs-tab" data-bs-toggle="tab" data-bs-target="#runs-pane" type="button" onclick="loadRuns()">
+                        <i class="bi bi-clock-history me-2"></i>Lịch sử đối soát
+                    </button>
+                </li>
+                <li class="nav-item d-none" id="users-nav-item">
+                    <button class="nav-link" id="users-tab" data-bs-toggle="tab" data-bs-target="#users-pane" type="button" onclick="loadUsers()">
+                        <i class="bi bi-people me-2"></i>Tài khoản
                     </button>
                 </li>
             </ul>
@@ -113,23 +232,23 @@
                         <!-- KHỐI TIÊU ĐỀ BẢNG VÀ CÁC NÚT BẤM CHUẨN -->
                         <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
                             <h5 class="m-0 fw-bold text-danger">
-                                <i class="bi bi-list-task me-2"></i>Danh Sách Giao Dịch Chờ Tra Soát
+                                <i class="bi bi-list-task me-2"></i>Danh sách giao dịch cần xử lý
                             </h5>
                             
                             <!-- Cụm nút nằm gọn gàng bên phải -->
-                            <div class="d-flex gap-2">
-                                <button type="button" class="btn btn-outline-success btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#uploadModal">
-                                    <i class="bi bi-cloud-upload me-1"></i> Tải Lên File Log Đối Soát
+                            <div class="action-group">
+                                <button type="button" class="btn btn-danger" data-bs-toggle="modal" data-bs-target="#uploadModal">
+                                    <i class="bi bi-cloud-upload me-1"></i> Tải file đối soát
                                 </button>
-                                <button type="button" id="restore-initial-button" class="btn btn-outline-danger btn-sm fw-bold" onclick="restoreInitialData()">
-                                    <i class="bi bi-arrow-clockwise me-1"></i> Làm mới
+                                <button type="button" id="restore-initial-button" class="btn btn-outline-danger" onclick="restoreInitialData()">
+                                    <i class="bi bi-arrow-counterclockwise me-1"></i> Khôi phục dữ liệu gốc
                                 </button>
                             </div>
                         </div>
-                        <div class="card-body border-bottom bg-light">
+                        <div class="card-body border-bottom filter-panel">
                             <h6 class="fw-bold text-secondary mb-2"><i class="bi bi-search me-1"></i>Tìm kiếm và lọc giao dịch</h6>
                             <div class="row g-2 align-items-end">
-                                <div class="col-12 col-md-3">
+                                <div class="col-12 col-md-4">
                                     <label for="filter-trans-id" class="form-label small fw-bold mb-1">Mã giao dịch</label>
                                     <input id="filter-trans-id" class="form-control form-control-sm" type="search" placeholder="Nhập mã giao dịch" oninput="applyTransactionFilters()">
                                 </div>
@@ -156,7 +275,7 @@
                                     </select>
                                 </div>
                                 <div class="col-12 col-md-3 d-grid">
-                                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="clearTransactionFilters()">Xóa lọc</button>
+                                    <button type="button" class="btn btn-outline-secondary" onclick="clearTransactionFilters()"><i class="bi bi-x-circle me-1"></i>Xóa bộ lọc</button>
                                 </div>
                                 <div class="col-12 small text-muted" id="transaction-count" aria-live="polite"></div>
                             </div>
@@ -178,9 +297,9 @@
                                     <tbody id="anomalies-table-body"></tbody>
                                 </table>
                             </div>
-                            <div class="d-flex justify-content-between align-items-center gap-2 p-3 border-top">
+                            <div class="pagination-bar">
                                 <button type="button" id="transactions-prev" class="btn btn-outline-secondary btn-sm" onclick="changeTransactionPage(-1)">Trang trước</button>
-                                <span id="transactions-page" class="small text-muted"></span>
+                                <span id="transactions-page" class="pagination-label"></span>
                                 <button type="button" id="transactions-next" class="btn btn-outline-secondary btn-sm" onclick="changeTransactionPage(1)">Trang sau</button>
                             </div>
                         </div>
@@ -192,11 +311,20 @@
                     <div class="card border-0 shadow-sm">
                         <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
                             <h5 class="m-0 text-primary fw-bold"><i class="bi bi-shield-lock-fill me-2"></i>Nhật Ký Thao Tác Cán Bộ IT Support</h5>
-                            <div class="d-flex gap-2">
-                                <button type="button" class="btn btn-outline-success btn-sm" onclick="downloadAuditReport()">
+                            <div class="action-group">
+                                <button type="button" class="btn btn-outline-success" onclick="downloadAuditReport()">
                                     <i class="bi bi-file-earmark-spreadsheet me-1"></i> Xuất báo cáo CSV
                                 </button>
-                                <button class="btn btn-outline-primary btn-sm" onclick="loadAuditLogs()"><i class="bi bi-arrow-clockwise me-1"></i> Cập nhật</button>
+                                <button class="btn btn-outline-primary" onclick="loadAuditLogs()"><i class="bi bi-arrow-clockwise me-1"></i> Tải lại</button>
+                            </div>
+                        </div>
+                        <div class="card-body border-bottom filter-panel">
+                            <div class="row g-3 align-items-end">
+                                <div class="col-md-2"><label class="form-label small" for="audit-status-filter">Trạng thái duyệt</label><select id="audit-status-filter" class="form-select form-select-sm" onchange="applyAuditFilters()"><option value="">Tất cả</option><option value="PENDING">Chờ duyệt</option><option value="APPROVED">Đã duyệt</option><option value="REJECTED">Từ chối</option><option value="SUPERSEDED">Hết hiệu lực</option></select></div>
+                                <div class="col-md-2"><label class="form-label small" for="audit-user-filter">Người đề xuất</label><input id="audit-user-filter" class="form-control form-control-sm" oninput="applyAuditFilters()"></div>
+                                <div class="col-md-2"><label class="form-label small" for="audit-date-from">Từ ngày</label><input id="audit-date-from" type="date" class="form-control form-control-sm" onchange="applyAuditFilters()"></div>
+                                <div class="col-md-2"><label class="form-label small" for="audit-date-to">Đến ngày</label><input id="audit-date-to" type="date" class="form-control form-control-sm" onchange="applyAuditFilters()"></div>
+                                <div class="col-md-2 d-grid"><button type="button" class="btn btn-outline-secondary" onclick="clearAuditFilters()"><i class="bi bi-x-circle me-1"></i>Xóa bộ lọc</button></div>
                             </div>
                         </div>
                         <div class="card-body p-0">
@@ -211,68 +339,61 @@
                                             <th>Lý Do Điều Chỉnh</th>
                                             <th>Cán Bộ Thao Tác</th>
                                             <th>Thời Gian</th>
+                                            <th>Phê Duyệt</th>
+                                            <th>Hành Động</th>
                                         </tr>
                                     </thead>
                                     <tbody id="audit-table-body"></tbody>
                                 </table>
                             </div>
+                            <div class="pagination-bar">
+                                <button type="button" class="btn btn-outline-secondary btn-sm" onclick="changeAuditPage(-1)">Trang trước</button>
+                                <span id="audit-page" class="pagination-label"></span>
+                                <button type="button" class="btn btn-outline-secondary btn-sm" onclick="changeAuditPage(1)">Trang sau</button>
+                            </div>
                         </div>
+                    </div>
+                </div>
+                <div class="tab-pane fade" id="runs-pane">
+                    <div class="card border-0 shadow-sm">
+                        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                            <h5 class="m-0 fw-bold">Các lần đối soát đã chạy</h5>
+                            <button class="btn btn-outline-primary" onclick="loadRuns()"><i class="bi bi-arrow-clockwise me-1"></i>Tải lại danh sách</button>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-striped align-middle m-0">
+                                <thead class="table-light"><tr><th>Thời gian</th><th>Người tải</th><th>File Core</th><th>File Partner</th><th>Tổng</th><th>Khớp</th><th>Lệch</th><th></th></tr></thead>
+                                <tbody id="runs-table-body"></tbody>
+                            </table>
+                        </div>
+                        <div class="pagination-bar">
+                            <button class="btn btn-outline-secondary btn-sm" onclick="changeRunsPage(-1)">Trang trước</button>
+                            <span id="runs-page" class="pagination-label"></span>
+                            <button class="btn btn-outline-secondary btn-sm" onclick="changeRunsPage(1)">Trang sau</button>
+                        </div>
+                        <div id="run-detail" class="run-detail d-none"></div>
+                    </div>
+                </div>
+                <div class="tab-pane fade" id="users-pane">
+                    <div class="card border-0 shadow-sm">
+                        <div class="card-header bg-white"><h5 class="m-0 fw-bold">Tạo tài khoản nhân viên</h5></div>
+                        <form class="card-body row g-3 align-items-end" onsubmit="createUser(event)">
+                            <div class="col-md-3"><label class="form-label" for="new-user-name">Tên đăng nhập</label><input id="new-user-name" class="form-control" pattern="[A-Za-z0-9._-]{3,50}" required></div>
+                            <div class="col-md-3"><label class="form-label" for="new-user-password">Mật khẩu (ít nhất 12 ký tự)</label><input id="new-user-password" type="password" class="form-control" minlength="12" required></div>
+                            <div class="col-md-3"><label class="form-label" for="new-user-role">Vai trò</label><select id="new-user-role" class="form-select"><option value="operator">Nhân viên xử lý</option><option value="approver">Người phê duyệt</option><option value="admin">Quản trị viên</option></select></div>
+                            <div class="col-md-3 d-grid"><button class="btn btn-danger">Tạo tài khoản</button></div>
+                        </form>
+                        <div class="table-responsive"><table class="table table-striped align-middle m-0"><thead class="table-light"><tr><th>Tên đăng nhập</th><th>Vai trò</th><th>Trạng thái</th><th>Ngày tạo</th><th>Người tạo</th><th></th></tr></thead><tbody id="users-table-body"></tbody></table></div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- FOOTER CHÂN TRANG CHUẨN AGRIBANK -->
-    <footer class="footer-agribank pt-4 pb-4 mt-auto">
-        <div class="container-fluid px-4">
-            <!-- Hàng Logo Header Chân Trang -->
-            <div class="d-flex justify-content-between align-items-center pb-3 border-bottom border-white border-opacity-25 mb-4">
-                <div class="d-flex align-items-center gap-3">
-                    <a href="https://www.agribank.com.vn/" target="_blank">
-                        <img src="/static/logo.png" alt="Agribank Logo" height="38" class="rounded" style="object-fit: cover;">
-                    </a>
-                    <span class="fs-6 fw-normal">Ngân hàng Nông nghiệp và Phát triển Nông thôn Việt Nam</span>
-                </div>
-            </div>
-
-            <!-- Nội dung Chân Trang 3 Cột -->
-            <div class="row g-4">
-                <!-- Cột 1: Thông tin Hội sở & Hotline -->
-                <div class="col-md-5">
-                    <div class="d-flex gap-3 align-items-start">
-                        <div class="footer-icon-circle flex-shrink-0 mt-1">
-                            <i class="bi bi-headset fs-5"></i>
-                        </div>
-                        <div>
-                            <p class="fw-bold fs-6 mb-2">Hội sở: Số 2 Láng Hạ, phường Giảng Võ, thành phố Hà Nội</p>
-                            <p class="mb-1 text-white-50">Sdt tiếp nhận: <span class="text-white">1900558818 / 024.3205.3205</span> để nhận được hỗ trợ</p>
-                            <p class="mb-1 text-white-50">Sdt gọi ra: <span class="text-white">024.2233.2345 / 037.353.2345 / 037.348.2345 / 037.346.2345</span></p>
-                            <p class="mb-1 text-white-50">Email: <span class="text-white">cskh@agribank.com.vn</span></p>
-                            <p class="mb-3 text-white-50">Swift Code: <span class="text-white">VBAAVNVX</span></p>
-                            <a href="https://www.agribank.com.vn/vn/lien-he" target="_blank" class="fw-bold d-inline-flex align-items-center">
-                                Liên hệ ngay <i class="bi bi-chevron-right ms-1"></i>
-                            </a>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Cột 2: Yêu cầu tư vấn -->
-                <div class="col-md-4">
-                    <div class="d-flex gap-3 align-items-start">
-                        <div class="footer-icon-circle flex-shrink-0 mt-1">
-                            <i class="bi bi-chat-left-text fs-6"></i>
-                        </div>
-                        <div>
-                            <p class="fw-bold fs-6 mb-2">Yêu cầu tư vấn</p>
-                            <p class="text-white-50 mb-3">Để lại nhu cầu của bạn và Agribank sẽ liên hệ lại trong khoảng thời gian sớm nhất</p>
-                            <a href="https://www.agribank.com.vn/vn/lien-he" target="_blank" class="fw-bold d-inline-flex align-items-center">
-                                Yêu cầu tư vấn <i class="bi bi-chevron-right ms-1"></i>
-                            </a>
-                        </div>
-                    </div>
-                </div>
-            </div>
+    <footer class="footer-agribank mt-auto">
+        <div class="app-container d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span>Hệ thống đối soát giao dịch</span>
+            <span>Không chia sẻ dữ liệu giao dịch ra ngoài đơn vị.</span>
         </div>
     </footer>
 
@@ -334,7 +455,7 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
-                    <button type="button" class="btn btn-danger" onclick="submitResolve()">Xác Nhận Xử Lý & Lưu Audit Log</button>
+                    <button type="button" class="btn btn-danger" onclick="submitResolve()">Gửi yêu cầu phê duyệt</button>
                 </div>
             </div>
         </div>
@@ -345,7 +466,11 @@
         const API_URL = '/api';
         let resolveModal, loginModal;
         let barChartInstance = null, pieChartInstance = null;
-        let allTransactions = [], filteredTransactions = [], currentTransactionPage = 1;
+        let allTransactions = [], currentTransactionPage = 1, totalTransactions = 0;
+        let currentAuditPage = 1, totalAuditLogs = 0, currentRunsPage = 1, totalRuns = 0;
+        let currentRunId = '', currentRunPage = 1, currentRunCount = 0;
+        let currentUserRole = sessionStorage.getItem('agribank_role') || '';
+        let transactionFilterTimer = null;
         let accessToken = sessionStorage.getItem('agribank_access_token') || '';
         const TRANSACTIONS_PER_PAGE = 100;
 
@@ -357,6 +482,7 @@
                 accessToken = '';
                 sessionStorage.removeItem('agribank_access_token');
                 sessionStorage.removeItem('agribank_user');
+                sessionStorage.removeItem('agribank_role');
                 loginModal?.show();
             }
             return response;
@@ -371,6 +497,8 @@
 
         function checkAuth() {
             const user = sessionStorage.getItem('agribank_user');
+            currentUserRole = sessionStorage.getItem('agribank_role') || '';
+            applyRoleVisibility();
             if (!accessToken) {
                 loginModal.show();
             } else {
@@ -395,6 +523,9 @@
                 accessToken = result.access_token;
                 sessionStorage.setItem('agribank_access_token', accessToken);
                 sessionStorage.setItem('agribank_user', result.username);
+                sessionStorage.setItem('agribank_role', result.role);
+                currentUserRole = result.role;
+                applyRoleVisibility();
                 document.getElementById('current-user-display').textContent = result.username;
                 document.getElementById('login-password').value = '';
                 loginModal.hide();
@@ -408,7 +539,14 @@
             accessToken = '';
             sessionStorage.removeItem('agribank_access_token');
             sessionStorage.removeItem('agribank_user');
+            sessionStorage.removeItem('agribank_role');
             location.reload();
+        }
+
+        function applyRoleVisibility() {
+            document.getElementById('users-nav-item').classList.toggle('d-none', currentUserRole !== 'admin');
+            document.getElementById('restore-initial-button').classList.toggle('d-none', currentUserRole !== 'admin');
+            document.querySelector('[data-bs-target="#uploadModal"]').classList.toggle('d-none', currentUserRole === 'approver');
         }
 
         async function loadData() {
@@ -431,47 +569,44 @@
 
             renderCharts(matched, amtMismatch, sttMismatch, missCore, missPartner);
 
-            const resTransactions = await apiFetch(`${API_URL}/anomalies`);
-            if (!resTransactions.ok) throw new Error('Không tải được danh sách giao dịch cần xử lý.');
-            const transactionData = await resTransactions.json();
-            allTransactions = (transactionData.data || []).filter(item =>
-                item.recon_status !== 'MATCHED' && Number(item.resolved) !== 1
-            );
-            populateStatusFilters();
-            applyTransactionFilters();
+            await populateStatusFilters();
+            await loadTransactionPage(1);
         }
 
-        function populateStatusFilters() {
+        async function populateStatusFilters() {
+            const response = await apiFetch(`${API_URL}/anomaly-options`);
+            if (!response.ok) throw new Error('Không tải được danh sách trạng thái.');
+            const options = await response.json();
             [
-                { id: 'filter-core-status', key: 'core_status' },
-                { id: 'filter-partner-status', key: 'partner_status' }
-            ].forEach(({ id, key }) => {
-                const select = document.getElementById(id);
-                const previousValue = select.value;
-                const statuses = [...new Set(allTransactions.map(item => item[key] || 'N/A'))]
-                    .sort((a, b) => a.localeCompare(b));
-                select.replaceChildren(new Option('Tất cả', ''));
-                statuses.forEach(status => {
-                    select.add(new Option(status === 'N/A' ? 'Không có dữ liệu' : status, status));
-                });
-                if (statuses.includes(previousValue)) select.value = previousValue;
+                { id: 'filter-core-status', values: options.core_statuses || [] },
+                { id: 'filter-partner-status', values: options.partner_statuses || [] }
+            ].forEach(({ id, values }) => {
+                const select = document.getElementById(id), previous = select.value;
+                select.replaceChildren(new Option('Tất cả', ''), new Option('Không có dữ liệu', '__MISSING__'));
+                values.forEach(status => select.add(new Option(status, status)));
+                if ([...select.options].some(option => option.value === previous)) select.value = previous;
             });
         }
 
         function applyTransactionFilters() {
-            const search = document.getElementById('filter-trans-id').value.trim().toLowerCase();
-            const reconStatus = document.getElementById('filter-recon-status').value;
-            const coreStatus = document.getElementById('filter-core-status').value;
-            const partnerStatus = document.getElementById('filter-partner-status').value;
-            filteredTransactions = allTransactions.filter(item => {
-                const itemCoreStatus = item.core_status || 'N/A';
-                const itemPartnerStatus = item.partner_status || 'N/A';
-                return (!search || String(item.trans_id).toLowerCase().includes(search))
-                    && (!reconStatus || item.recon_status === reconStatus)
-                    && (!coreStatus || itemCoreStatus === coreStatus)
-                    && (!partnerStatus || itemPartnerStatus === partnerStatus);
+            clearTimeout(transactionFilterTimer);
+            transactionFilterTimer = setTimeout(() => loadTransactionPage(1).catch(error => alert(error.message)), 250);
+        }
+
+        async function loadTransactionPage(page) {
+            currentTransactionPage = page;
+            const params = new URLSearchParams({
+                page: String(page), page_size: String(TRANSACTIONS_PER_PAGE),
+                trans_id: document.getElementById('filter-trans-id').value.trim(),
+                recon_status: document.getElementById('filter-recon-status').value,
+                core_status: document.getElementById('filter-core-status').value,
+                partner_status: document.getElementById('filter-partner-status').value
             });
-            currentTransactionPage = 1;
+            const response = await apiFetch(`${API_URL}/anomalies?${params}`);
+            if (!response.ok) throw new Error('Không tải được danh sách giao dịch cần xử lý.');
+            const data = await response.json();
+            allTransactions = data.data || [];
+            totalTransactions = data.count || 0;
             renderTransactionsPage();
         }
 
@@ -482,16 +617,28 @@
         }
 
         function changeTransactionPage(offset) {
-            const pageCount = Math.max(1, Math.ceil(filteredTransactions.length / TRANSACTIONS_PER_PAGE));
-            currentTransactionPage = Math.min(pageCount, Math.max(1, currentTransactionPage + offset));
-            renderTransactionsPage();
+            const pageCount = Math.max(1, Math.ceil(totalTransactions / TRANSACTIONS_PER_PAGE));
+            loadTransactionPage(Math.min(pageCount, Math.max(1, currentTransactionPage + offset)))
+                .catch(error => alert(error.message));
+        }
+
+        function appendEmptyRow(tbody, columnCount, message) {
+            const row = document.createElement('tr');
+            const cell = document.createElement('td');
+            cell.colSpan = columnCount;
+            cell.className = 'empty-state';
+            cell.textContent = message;
+            row.appendChild(cell);
+            tbody.appendChild(row);
         }
 
         function renderTransactionsPage() {
             const tbody = document.getElementById('anomalies-table-body');
             tbody.replaceChildren();
             const start = (currentTransactionPage - 1) * TRANSACTIONS_PER_PAGE;
-            const pageItems = filteredTransactions.slice(start, start + TRANSACTIONS_PER_PAGE);
+            const pageItems = allTransactions;
+
+            if (!pageItems.length) appendEmptyRow(tbody, 7, 'Không có giao dịch nào khớp với bộ lọc.');
 
             pageItems.forEach(item => {
                 const tr = document.createElement('tr');
@@ -525,23 +672,26 @@
                 tr.appendChild(statusCell);
 
                 const actionCell = addCell('', 'text-center');
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.className = 'btn btn-sm btn-danger';
-                button.innerHTML = '<i class="bi bi-tools me-1"></i> Xử lý';
-                button.addEventListener('click', () => openResolveModal(item.trans_id));
-                actionCell.appendChild(button);
+                if (['admin', 'operator'].includes(currentUserRole)) {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'btn btn-sm btn-danger';
+                    button.innerHTML = '<i class="bi bi-tools me-1"></i> Xử lý';
+                    button.addEventListener('click', () => openResolveModal(item.trans_id));
+                    actionCell.appendChild(button);
+                }
                 tbody.appendChild(tr);
             });
 
-            const pageCount = Math.max(1, Math.ceil(filteredTransactions.length / TRANSACTIONS_PER_PAGE));
-            document.getElementById('transaction-count').textContent = `Hiển thị ${filteredTransactions.length ? start + 1 : 0}–${Math.min(start + pageItems.length, filteredTransactions.length)} / ${filteredTransactions.length.toLocaleString()} giao dịch phù hợp (tổng ${allTransactions.length.toLocaleString()} giao dịch cần xử lý)`;
+            const pageCount = Math.max(1, Math.ceil(totalTransactions / TRANSACTIONS_PER_PAGE));
+            document.getElementById('transaction-count').textContent = `Hiển thị ${totalTransactions ? start + 1 : 0}–${Math.min(start + pageItems.length, totalTransactions)} / ${totalTransactions.toLocaleString()} giao dịch cần xử lý`;
             document.getElementById('transactions-page').textContent = `Trang ${currentTransactionPage} / ${pageCount}`;
             document.getElementById('transactions-prev').disabled = currentTransactionPage <= 1;
             document.getElementById('transactions-next').disabled = currentTransactionPage >= pageCount;
         }
 
         async function restoreInitialData() {
+            if (!confirm('Khôi phục bộ dữ liệu ban đầu? Dữ liệu đối soát hiện tại sẽ bị thay thế.')) return;
             const button = document.getElementById('restore-initial-button');
             if (button) button.disabled = true;
             try {
@@ -600,13 +750,23 @@
         }
 
         async function loadAuditLogs() {
-            const res = await apiFetch(`${API_URL}/audit-logs`);
+            const params = new URLSearchParams({
+                page: String(currentAuditPage), page_size: '50',
+                review_status: document.getElementById('audit-status-filter').value,
+                performed_by: document.getElementById('audit-user-filter').value.trim(),
+                date_from: document.getElementById('audit-date-from').value,
+                date_to: document.getElementById('audit-date-to').value
+            });
+            const res = await apiFetch(`${API_URL}/audit-logs?${params}`);
             if (!res.ok) throw new Error('Không tải được nhật ký kiểm toán.');
             const data = await res.json();
+            totalAuditLogs = data.count || 0;
             const tbody = document.getElementById('audit-table-body');
             tbody.replaceChildren();
 
-            data.data.forEach(log => {
+            if (!data.data?.length) appendEmptyRow(tbody, 9, 'Chưa có nhật ký phù hợp với bộ lọc.');
+
+            (data.data || []).forEach(log => {
                 const tr = document.createElement('tr');
                 const addCell = (value, className = '') => {
                     const td = document.createElement('td');
@@ -626,8 +786,175 @@
                 addCell(log.reason);
                 addCell(log.performed_by, 'fw-bold text-dark');
                 addCell(log.created_at, 'text-muted small');
+                const decisionCell = addCell('');
+                const decisionBadge = document.createElement('span');
+                decisionBadge.className = `badge ${log.review_status === 'APPROVED' ? 'bg-success' : log.review_status === 'PENDING' ? 'bg-warning text-dark' : 'bg-secondary'}`;
+                decisionBadge.textContent = log.review_status || 'APPROVED';
+                decisionCell.appendChild(decisionBadge);
+                const approvalActionCell = addCell('');
+                if (log.review_status === 'PENDING' && ['admin', 'approver'].includes(currentUserRole)
+                    && log.performed_by.toLowerCase() !== sessionStorage.getItem('agribank_user')?.toLowerCase()) {
+                    const approve = document.createElement('button');
+                    approve.type = 'button';
+                    approve.className = 'btn btn-success btn-sm me-1';
+                    approve.textContent = 'Duyệt';
+                    approve.addEventListener('click', () => decideReview(log.log_id, 'APPROVE'));
+                    const reject = document.createElement('button');
+                    reject.type = 'button';
+                    reject.className = 'btn btn-outline-danger btn-sm';
+                    reject.textContent = 'Từ chối';
+                    reject.addEventListener('click', () => decideReview(log.log_id, 'REJECT'));
+                    approvalActionCell.append(approve, reject);
+                } else if (log.approved_by) {
+                    approvalActionCell.textContent = `Duyệt bởi ${log.approved_by}`;
+                    if (log.approval_comment) approvalActionCell.title = log.approval_comment;
+                }
                 tbody.appendChild(tr);
             });
+            const pages = Math.max(1, Math.ceil(totalAuditLogs / 50));
+            document.getElementById('audit-page').textContent = `Trang ${currentAuditPage} / ${pages} · ${totalAuditLogs.toLocaleString()} bản ghi`;
+        }
+
+        function changeAuditPage(offset) {
+            const pages = Math.max(1, Math.ceil(totalAuditLogs / 50));
+            currentAuditPage = Math.min(pages, Math.max(1, currentAuditPage + offset));
+            loadAuditLogs().catch(error => alert(error.message));
+        }
+
+        function applyAuditFilters() {
+            currentAuditPage = 1;
+            loadAuditLogs().catch(error => alert(error.message));
+        }
+
+        function clearAuditFilters() {
+            ['audit-status-filter', 'audit-user-filter', 'audit-date-from', 'audit-date-to']
+                .forEach(id => { document.getElementById(id).value = ''; });
+            applyAuditFilters();
+        }
+
+        async function decideReview(logId, decision) {
+            const comment = prompt(decision === 'APPROVE' ? 'Ghi chú phê duyệt (không bắt buộc):' : 'Lý do từ chối:');
+            if (comment === null) return;
+            if (decision === 'REJECT' && !comment.trim()) { alert('Cần nhập lý do từ chối.'); return; }
+            const response = await apiFetch(`${API_URL}/audit-logs/${logId}/decision`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ decision, comment })
+            });
+            const result = await response.json();
+            if (!response.ok) { alert(result.detail || 'Không lưu được quyết định.'); return; }
+            await Promise.all([loadAuditLogs(), loadData()]);
+        }
+
+        async function loadRuns() {
+            const response = await apiFetch(`${API_URL}/runs?page=${currentRunsPage}&page_size=25`);
+            if (!response.ok) throw new Error('Không tải được lịch sử đối soát.');
+            const result = await response.json();
+            totalRuns = result.count || 0;
+            const body = document.getElementById('runs-table-body');
+            body.replaceChildren();
+            if (!(result.data || []).length) appendEmptyRow(body, 8, 'Chưa có lần đối soát nào được ghi nhận.');
+            (result.data || []).forEach(run => {
+                const row = document.createElement('tr');
+                [run.created_at, run.performed_by, run.core_filename, run.partner_filename,
+                    Number(run.transaction_count).toLocaleString(), Number(run.matched_count).toLocaleString(),
+                    Number(run.discrepancy_count).toLocaleString()].forEach(value => {
+                    const cell = document.createElement('td'); cell.textContent = value ?? ''; row.appendChild(cell);
+                });
+                const cell = document.createElement('td');
+                const button = document.createElement('button'); button.className = 'btn btn-outline-primary btn-sm';
+                button.textContent = 'Xem'; button.addEventListener('click', () => loadRun(run.run_id));
+                cell.appendChild(button); row.appendChild(cell); body.appendChild(row);
+            });
+            const pages = Math.max(1, Math.ceil(totalRuns / 25));
+            document.getElementById('runs-page').textContent = `Trang ${currentRunsPage} / ${pages} · ${totalRuns.toLocaleString()} lần đối soát`;
+        }
+
+        function changeRunsPage(offset) {
+            const pages = Math.max(1, Math.ceil(totalRuns / 25));
+            currentRunsPage = Math.min(pages, Math.max(1, currentRunsPage + offset));
+            loadRuns().catch(error => alert(error.message));
+        }
+
+        async function loadRun(runId, page = 1) {
+            currentRunId = runId; currentRunPage = page;
+            const response = await apiFetch(`${API_URL}/runs/${encodeURIComponent(runId)}?page=${page}&page_size=100`);
+            if (!response.ok) { alert('Không tải được chi tiết lần đối soát.'); return; }
+            const result = await response.json(), detail = document.getElementById('run-detail');
+            currentRunCount = Number(result.run.transaction_count);
+            detail.classList.remove('d-none'); detail.replaceChildren();
+            const title = document.createElement('h6');
+            title.textContent = `Chi tiết lần đối soát ${result.run.run_id} · ${Number(result.run.transaction_count).toLocaleString()} giao dịch`;
+            detail.appendChild(title);
+            const table = document.createElement('table'); table.className = 'table table-sm table-striped';
+            const head = document.createElement('thead'), headRow = document.createElement('tr');
+            ['Mã giao dịch', 'Core', 'Napas', 'Trạng thái Core', 'Trạng thái Napas', 'Kết quả'].forEach(label => {
+                const cell = document.createElement('th'); cell.textContent = label; headRow.appendChild(cell);
+            });
+            head.appendChild(headRow); table.appendChild(head);
+            const body = document.createElement('tbody');
+            (result.data || []).forEach(item => {
+                const row = document.createElement('tr');
+                [item.trans_id, item.core_amount, item.partner_amount, item.core_status, item.partner_status, item.recon_status].forEach(value => {
+                    const cell = document.createElement('td'); cell.textContent = value == null ? '—' : String(value); row.appendChild(cell);
+                }); body.appendChild(row);
+            });
+            table.appendChild(body); detail.appendChild(table);
+            const pageCount = Math.max(1, Math.ceil(currentRunCount / 100));
+            const pager = document.createElement('div'); pager.className = 'd-flex justify-content-between align-items-center';
+            const previous = document.createElement('button'); previous.className = 'btn btn-outline-secondary btn-sm'; previous.textContent = 'Trang trước';
+            previous.disabled = currentRunPage <= 1; previous.addEventListener('click', () => loadRun(currentRunId, currentRunPage - 1));
+            const pageLabel = document.createElement('span'); pageLabel.className = 'small text-muted'; pageLabel.textContent = `Trang ${currentRunPage} / ${pageCount}`;
+            const next = document.createElement('button'); next.className = 'btn btn-outline-secondary btn-sm'; next.textContent = 'Trang sau';
+            next.disabled = currentRunPage >= pageCount; next.addEventListener('click', () => loadRun(currentRunId, currentRunPage + 1));
+            pager.append(previous, pageLabel, next); detail.appendChild(pager);
+        }
+
+        async function loadUsers() {
+            const response = await apiFetch(`${API_URL}/users`);
+            if (!response.ok) throw new Error('Không tải được danh sách tài khoản.');
+            const result = await response.json(), body = document.getElementById('users-table-body');
+            body.replaceChildren();
+            if (!(result.data || []).length) appendEmptyRow(body, 6, 'Chưa có tài khoản nào.');
+            (result.data || []).forEach(user => {
+                const row = document.createElement('tr');
+                [user.username, user.role, user.is_active ? 'Đang hoạt động' : 'Đã khóa', user.created_at, user.created_by].forEach(value => {
+                    const cell = document.createElement('td'); cell.textContent = value ?? ''; row.appendChild(cell);
+                });
+                const actionCell = document.createElement('td');
+                if (user.username.toLowerCase() !== sessionStorage.getItem('agribank_user')?.toLowerCase()) {
+                    const button = document.createElement('button');
+                    button.className = `btn btn-sm ${user.is_active ? 'btn-outline-danger' : 'btn-outline-success'}`;
+                    button.textContent = user.is_active ? 'Khóa' : 'Mở khóa';
+                    button.addEventListener('click', () => setUserActive(user.username, !user.is_active));
+                    actionCell.appendChild(button);
+                }
+                row.appendChild(actionCell); body.appendChild(row);
+            });
+        }
+
+        async function createUser(event) {
+            event.preventDefault();
+            const response = await apiFetch(`${API_URL}/users`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username: document.getElementById('new-user-name').value.trim(),
+                    password: document.getElementById('new-user-password').value,
+                    role: document.getElementById('new-user-role').value
+                })
+            });
+            const result = await response.json();
+            if (!response.ok) { alert(result.detail || 'Không tạo được tài khoản.'); return; }
+            event.target.reset(); await loadUsers();
+        }
+
+        async function setUserActive(username, isActive) {
+            const response = await apiFetch(`${API_URL}/users/${encodeURIComponent(username)}/active`, {
+                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ is_active: isActive })
+            });
+            const result = await response.json();
+            if (!response.ok) { alert(result.detail || 'Không cập nhật được tài khoản.'); return; }
+            await loadUsers();
         }
 
         async function downloadAuditReport() {
@@ -672,17 +999,39 @@
             formData.append('core_file', coreFileInput.files[0]);
             formData.append('partner_file', partnerFileInput.files[0]);
 
+            if (coreFileInput.files[0].size > 10 * 1024 * 1024 || partnerFileInput.files[0].size > 10 * 1024 * 1024) {
+                alert('Mỗi file CSV phải có dung lượng không quá 10 MB.');
+                return;
+            }
+
             alertBox.classList.remove('d-none');
 
             try {
+                const previewResponse = await apiFetch('/api/upload-preview', { method: 'POST', body: formData });
+                const preview = await previewResponse.json();
+                if (!previewResponse.ok) throw new Error(preview.detail || 'Không kiểm tra được file.');
+                formData.append('expected_run_id', preview.current_run_id || '');
+                const breakdown = Object.entries(preview.by_status || {})
+                    .map(([status, count]) => `${status}: ${Number(count).toLocaleString()}`).join('\n');
+                const confirmed = confirm(
+                    `Xem trước kết quả đối soát:\n` +
+                    `Core: ${coreFileInput.files[0].name}\nPartner: ${partnerFileInput.files[0].name}\n\n` +
+                    `Tổng giao dịch: ${Number(preview.transaction_count).toLocaleString()}\n` +
+                    `Khớp: ${Number(preview.matched_count).toLocaleString()}\n` +
+                    `Cần tra soát: ${Number(preview.discrepancy_count).toLocaleString()}\n` +
+                    `${breakdown ? `\nPhân loại:\n${breakdown}\n` : ''}\n` +
+                    `Nếu tiếp tục, dữ liệu hiện tại sẽ được thay bằng kết quả mới.`
+                );
+                if (!confirmed) return;
                 const response = await apiFetch('/api/upload-and-reconcile', {
                     method: 'POST',
                     body: formData
                 });
                 const result = await response.json();
 
-                if (result.status === 'success') {
+                if (response.ok && result.status === 'success') {
                     alert('Đối soát hoàn tất thành công!');
+                    if (result.warning) alert(result.warning);
                     // Đóng modal
                     const modalElement = document.getElementById('uploadModal');
                     const modal = bootstrap.Modal.getInstance(modalElement);
@@ -691,11 +1040,11 @@
                     clearTransactionFilters();
                     await loadData();
                 } else {
-                    alert('Có lỗi xảy ra: ' + (result.detail || result.message || response.statusText));
+                    throw new Error(result.detail || result.message || response.statusText);
                 }
             } catch (error) {
                 console.error('Lỗi upload:', error);
-                alert('Lỗi kết nối máy chủ!');
+                alert(error.message || 'Lỗi kết nối máy chủ!');
             } finally {
                 alertBox.classList.add('d-none');
             }
@@ -723,7 +1072,7 @@
             });
 
             if (res.ok) {
-                alert('✅ Xử lý giao dịch thành công!');
+                alert('Đã gửi yêu cầu xử lý để người có quyền phê duyệt xác nhận.');
                 resolveModal.hide();
                 loadData();
             } else {

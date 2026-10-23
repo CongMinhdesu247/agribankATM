@@ -1,9 +1,9 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import csv
+import hashlib
 import io
-import hmac
-import math
+import logging
 import os
 import shutil
 import tempfile
@@ -12,14 +12,17 @@ import uuid
 from io import BytesIO
 from typing import Literal
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import sqlite3
 import config
 import reconcile_engine
-from security import create_access_token, require_auth, verify_password
+from security import create_access_token, hash_password, verify_access_token, verify_password
+
+logger = logging.getLogger(__name__)
 
 if len(config.JWT_SECRET) < 32 or not config.APP_USERNAME or not config.APP_PASSWORD_HASH:
     raise RuntimeError("Authentication is not configured. Run setup_admin.py to create the .env file.")
@@ -28,6 +31,21 @@ app = FastAPI(title="Agribank Reconciliation Review", docs_url=None, redoc_url=N
 BASE_DIR = config.BASE_DIR
 DB_PATH = config.DB_PATH
 reconcile_engine.initialize_database()
+
+def seed_admin_user() -> None:
+    """Import the configured bootstrap admin once, then use database users."""
+    if not config.APP_USERNAME or not config.APP_PASSWORD_HASH:
+        return
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO app_users (username, password_hash, role, is_active, created_at, created_by)
+            VALUES (?, ?, 'admin', 1, CURRENT_TIMESTAMP, 'bootstrap')
+        """, (config.APP_USERNAME, config.APP_PASSWORD_HASH))
+        conn.commit()
+    finally:
+        conn.close()
+
 
 @app.middleware("http")
 async def set_security_headers(request: Request, call_next):
@@ -43,33 +61,136 @@ class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=50)
     password: str = Field(min_length=1, max_length=256)
 
-LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9._-]+$")
+    password: str = Field(min_length=12, max_length=256)
+    role: Literal["admin", "operator", "approver"]
+
+
+class UserActiveRequest(BaseModel):
+    is_active: bool
+
+
+class AuditDecisionRequest(BaseModel):
+    decision: Literal["APPROVE", "REJECT"]
+    comment: str = Field(default="", max_length=2000)
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Bearer token required", headers={"WWW-Authenticate": "Bearer"})
+    username = verify_access_token(credentials.credentials)
+    if username is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    conn = get_db_connection()
+    try:
+        user = conn.execute(
+            "SELECT username, role, is_active FROM app_users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if user is None or not user["is_active"]:
+        raise HTTPException(status_code=401, detail="Invalid or disabled account", headers={"WWW-Authenticate": "Bearer"})
+    return {"username": user["username"], "role": user["role"]}
+
+
+def require_role(*allowed_roles: str):
+    def dependency(user=Depends(current_user)):
+        if user["role"] not in allowed_roles:
+            raise HTTPException(status_code=403, detail="You do not have permission to perform this action")
+        return user
+    return dependency
+
+
+@app.get("/api/users")
+def list_users(_user=Depends(require_role("admin"))):
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT username, role, is_active, created_at, created_by FROM app_users ORDER BY username COLLATE NOCASE"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {"data": [dict(row) for row in rows]}
+
+
+@app.post("/api/users", status_code=201)
+def create_user(req: UserCreateRequest, user=Depends(require_role("admin"))):
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT INTO app_users (username, password_hash, role, is_active, created_at, created_by)
+            VALUES (?, ?, ?, 1, ?, ?)
+        """, (req.username, hash_password(req.password), req.role,
+              datetime.now().astimezone().isoformat(timespec="seconds"), user["username"]))
+        conn.commit()
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(status_code=409, detail="Username already exists") from error
+    finally:
+        conn.close()
+    return {"status": "success", "username": req.username, "role": req.role}
+
+
+@app.patch("/api/users/{username}/active")
+def set_user_active(username: str, req: UserActiveRequest, user=Depends(require_role("admin"))):
+    conn = get_db_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        target = conn.execute(
+            "SELECT username, role, is_active FROM app_users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        if target is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        if not req.is_active and target["username"].casefold() == user["username"].casefold():
+            raise HTTPException(status_code=409, detail="You cannot disable your own account")
+        if not req.is_active and target["role"] == "admin" and target["is_active"]:
+            active_admins = conn.execute(
+                "SELECT COUNT(*) FROM app_users WHERE role = 'admin' AND is_active = 1"
+            ).fetchone()[0]
+            if active_admins <= 1:
+                raise HTTPException(status_code=409, detail="At least one active administrator is required")
+        conn.execute("UPDATE app_users SET is_active = ? WHERE username = ? COLLATE NOCASE",
+                     (int(req.is_active), username))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "success", "username": target["username"], "is_active": req.is_active}
 
 @app.post("/api/login")
 def login(req: LoginRequest, request: Request):
-    now = time.monotonic()
+    now = time.time()
     client_ip = request.client.host if request.client else "unknown"
-    if len(LOGIN_ATTEMPTS) > 4096:
-        cutoff = now - 300
-        for ip, stamps in list(LOGIN_ATTEMPTS.items()):
-            active = [stamp for stamp in stamps if stamp >= cutoff]
-            if active:
-                LOGIN_ATTEMPTS[ip] = active
-            else:
-                LOGIN_ATTEMPTS.pop(ip, None)
-    attempts = [stamp for stamp in LOGIN_ATTEMPTS.get(client_ip, []) if now - stamp < 300]
-    if len(attempts) >= 5:
-        raise HTTPException(status_code=429, detail="Too many failed login attempts; try again in five minutes")
-
-    username_ok = hmac.compare_digest(req.username.strip().encode("utf-8"), config.APP_USERNAME.encode("utf-8"))
-    password_ok = verify_password(req.password, config.APP_PASSWORD_HASH)
-    if not username_ok or not password_ok:
-        attempts.append(now)
-        LOGIN_ATTEMPTS[client_ip] = attempts
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    LOGIN_ATTEMPTS.pop(client_ip, None)
-    token, expires_in = create_access_token(config.APP_USERNAME)
-    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in, "username": config.APP_USERNAME}
+    ip_hash = hashlib.sha256(f"{config.JWT_SECRET}:{client_ip}".encode("utf-8")).hexdigest()
+    conn = get_db_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (now - 300,))
+        attempts = conn.execute(
+            "SELECT COUNT(*) FROM login_attempts WHERE ip_hash = ? AND attempted_at >= ?",
+            (ip_hash, now - 300),
+        ).fetchone()[0]
+        if attempts >= 5:
+            conn.commit()
+            raise HTTPException(status_code=429, detail="Too many failed login attempts; try again in five minutes")
+        user = conn.execute(
+            "SELECT username, password_hash, role, is_active FROM app_users WHERE username = ? COLLATE NOCASE",
+            (req.username.strip(),),
+        ).fetchone()
+        password_ok = verify_password(req.password, user["password_hash"] if user else config.APP_PASSWORD_HASH)
+        if user is None or not user["is_active"] or not password_ok:
+            conn.execute("INSERT INTO login_attempts (ip_hash, attempted_at) VALUES (?, ?)", (ip_hash, now))
+            conn.commit()
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        conn.execute("DELETE FROM login_attempts WHERE ip_hash = ?", (ip_hash,))
+        conn.commit()
+    finally:
+        conn.close()
+    token, expires_in = create_access_token(user["username"])
+    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in,
+            "username": user["username"], "role": user["role"]}
 
 # Serve static assets from the project directory.
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -86,7 +207,11 @@ def get_db_connection():
     # Sửa 'reconciliation.db' thành 'agribank_recon.db'
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+seed_admin_user()
 
 def ensure_audit_report_columns(conn):
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_logs)")}
@@ -107,96 +232,183 @@ def csv_safe_text(value):
         return "'" + text
     return text
 
-def ensure_initial_baseline(conn):
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS reconciliation_baseline (
-            trans_id TEXT PRIMARY KEY,
-            core_amount REAL,
-            partner_amount REAL,
-            core_status TEXT,
-            partner_status TEXT,
-            recon_status TEXT NOT NULL,
-            resolved INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    if cursor.execute("SELECT COUNT(*) FROM reconciliation_baseline").fetchone()[0]:
-        return
-
-    current_count = cursor.execute("SELECT COUNT(*) FROM reconciliation_results").fetchone()[0]
-    if current_count:
-        cursor.execute('''
-            INSERT INTO reconciliation_baseline
-                (trans_id, core_amount, partner_amount, core_status, partner_status, recon_status, resolved, created_at)
-            SELECT trans_id, core_amount, partner_amount, core_status, partner_status, recon_status, resolved, created_at
-            FROM reconciliation_results
-        ''')
-
 # --- CÁC API KHÁC GIỮ NGUYÊN ---
 @app.get("/api/stats")
-def get_stats(_username: str = Depends(require_auth)):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT recon_status, COUNT(*) as total 
-        FROM reconciliation_results 
-        WHERE resolved = 0 AND recon_status != 'MATCHED'
-        GROUP BY recon_status
-    ''')
-    rows = cursor.fetchall()
-    stats = {row['recon_status']: row['total'] for row in rows}
-    
-    cursor.execute("SELECT COUNT(*) AS total FROM reconciliation_results WHERE recon_status = 'MATCHED'")
-    stats['MATCHED'] = cursor.fetchone()['total']
-    conn.close()
-    return {"status": "success", "data": stats}
-
-@app.get("/api/anomalies")
-def get_anomalies(_username: str = Depends(require_auth)):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT * FROM reconciliation_results 
-        WHERE recon_status != 'MATCHED' AND resolved = 0
-        ORDER BY trans_id ASC
-    ''')
-    rows = cursor.fetchall()
-    conn.close()
-    return {"status": "success", "count": len(rows), "data": [dict(row) for row in rows]}
-
-@app.get("/api/transactions")
-def get_transactions(_username: str = Depends(require_auth)):
-    conn = get_db_connection()
-    rows = conn.execute('''
-        SELECT * FROM reconciliation_results
-        ORDER BY trans_id ASC
-    ''').fetchall()
-    conn.close()
-    return {"status": "success", "count": len(rows), "data": [dict(row) for row in rows]}
-
-@app.post("/api/restore-baseline")
-def restore_baseline(_username: str = Depends(require_auth)):
+def get_stats(_user=Depends(current_user)):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        if cursor.execute("SELECT COUNT(*) FROM reconciliation_baseline").fetchone()[0] == 0:
-            raise HTTPException(status_code=409, detail="No baseline dataset is available to restore")
+        cursor.execute('''
+            SELECT recon_status, COUNT(*) as total
+            FROM reconciliation_results
+            WHERE resolved = 0 AND recon_status != 'MATCHED'
+              AND NOT EXISTS (
+                  SELECT 1 FROM audit_logs a WHERE a.trans_id = reconciliation_results.trans_id
+                    AND a.run_id IS reconciliation_results.run_id AND a.review_status = 'PENDING'
+              )
+            GROUP BY recon_status
+        ''')
+        rows = cursor.fetchall()
+        stats = {row['recon_status']: row['total'] for row in rows}
+        cursor.execute("SELECT COUNT(*) AS total FROM reconciliation_results WHERE recon_status = 'MATCHED'")
+        stats['MATCHED'] = cursor.fetchone()['total']
+    finally:
+        conn.close()
+    return {"status": "success", "data": stats}
+
+
+def _bounded_page(page: int, page_size: int, maximum_page_size: int) -> tuple[int, int]:
+    # Keep SQLite LIMIT/OFFSET bind values in a safe range even for hostile
+    # integer query parameters that are far beyond SQLite's signed 64-bit limit.
+    return min(1_000_000, max(1, page)), min(maximum_page_size, max(1, page_size))
+
+
+@app.get("/api/runs")
+def list_reconciliation_runs(page: int = 1, page_size: int = 25, _user=Depends(current_user)):
+    page, page_size = _bounded_page(page, page_size, 100)
+    conn = get_db_connection()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM reconciliation_runs").fetchone()[0]
+        rows = conn.execute("""
+            SELECT run_id, created_at, performed_by, core_filename, partner_filename,
+                   transaction_count, matched_count, discrepancy_count
+            FROM reconciliation_runs ORDER BY created_at DESC, run_id DESC LIMIT ? OFFSET ?
+        """, (page_size, (page - 1) * page_size)).fetchall()
+    finally:
+        conn.close()
+    return {"count": total, "page": page, "page_size": page_size, "data": [dict(row) for row in rows]}
+
+
+@app.get("/api/runs/{run_id}")
+def get_reconciliation_run(run_id: str, page: int = 1, page_size: int = 100, _user=Depends(current_user)):
+    page, page_size = _bounded_page(page, page_size, 200)
+    conn = get_db_connection()
+    try:
+        run = conn.execute("SELECT * FROM reconciliation_runs WHERE run_id = ?", (run_id,)).fetchone()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Reconciliation run not found")
+        rows = conn.execute("""
+            SELECT trans_id, core_amount, partner_amount, core_status, partner_status, recon_status
+            FROM reconciliation_run_results WHERE run_id = ? ORDER BY trans_id LIMIT ? OFFSET ?
+        """, (run_id, page_size, (page - 1) * page_size)).fetchall()
+    finally:
+        conn.close()
+    return {"run": dict(run), "page": page, "page_size": page_size, "data": [dict(row) for row in rows]}
+
+@app.get("/api/anomalies")
+def get_anomalies(
+    page: int = 1, page_size: int = 100, trans_id: str = "", recon_status: str = "",
+    core_status: str = "", partner_status: str = "", _user=Depends(current_user),
+):
+    page, page_size = _bounded_page(page, page_size, 200)
+    clauses = ["recon_status != 'MATCHED'", "resolved = 0",
+               "NOT EXISTS (SELECT 1 FROM audit_logs a WHERE a.trans_id = reconciliation_results.trans_id "
+               "AND a.run_id IS reconciliation_results.run_id AND a.review_status = 'PENDING')"]
+    params: list[object] = []
+    if trans_id.strip():
+        clauses.append("trans_id LIKE ? ESCAPE '\\'")
+        escaped = trans_id.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f"%{escaped}%")
+    for column, value in (("recon_status", recon_status), ("core_status", core_status), ("partner_status", partner_status)):
+        if value:
+            if value == "__MISSING__" and column != "recon_status":
+                clauses.append(f"{column} IS NULL")
+            else:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+    where = " AND ".join(clauses)
+    conn = get_db_connection()
+    try:
+        total = conn.execute(f"SELECT COUNT(*) FROM reconciliation_results WHERE {where}", params).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM reconciliation_results WHERE {where} ORDER BY trans_id ASC LIMIT ? OFFSET ?",
+            [*params, page_size, (page - 1) * page_size],
+        ).fetchall()
+    finally:
+        conn.close()
+    return {"status": "success", "count": total, "page": page, "page_size": page_size,
+            "data": [dict(row) for row in rows]}
+
+
+@app.get("/api/anomaly-options")
+def get_anomaly_options(_user=Depends(current_user)):
+    conn = get_db_connection()
+    try:
+        core = conn.execute("""
+            SELECT DISTINCT core_status FROM reconciliation_results
+            WHERE resolved = 0 AND core_status IS NOT NULL ORDER BY core_status
+        """).fetchall()
+        partner = conn.execute("""
+            SELECT DISTINCT partner_status FROM reconciliation_results
+            WHERE resolved = 0 AND partner_status IS NOT NULL ORDER BY partner_status
+        """).fetchall()
+    finally:
+        conn.close()
+    return {"core_statuses": [row[0] for row in core], "partner_statuses": [row[0] for row in partner]}
+
+@app.get("/api/transactions")
+def get_transactions(page: int = 1, page_size: int = 100, _user=Depends(current_user)):
+    page, page_size = _bounded_page(page, page_size, 200)
+    conn = get_db_connection()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM reconciliation_results").fetchone()[0]
+        rows = conn.execute("SELECT * FROM reconciliation_results ORDER BY trans_id ASC LIMIT ? OFFSET ?",
+                            (page_size, (page - 1) * page_size)).fetchall()
+    finally:
+        conn.close()
+    return {"status": "success", "count": total, "page": page, "page_size": page_size,
+            "data": [dict(row) for row in rows]}
+
+@app.post("/api/restore-baseline")
+def restore_baseline(user=Depends(require_role("admin"))):
+    conn = get_db_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.cursor()
+        state = cursor.execute("SELECT 1 FROM reconciliation_baseline_state WHERE baseline_id = 1").fetchone()
+        if state is None:
+            legacy_rows = cursor.execute("SELECT * FROM reconciliation_baseline").fetchall()
+            cursor.execute("""
+                INSERT INTO reconciliation_baseline_state (baseline_id, captured_at, transaction_count)
+                VALUES (1, CURRENT_TIMESTAMP, ?)
+            """, (len(legacy_rows),))
+            if legacy_rows:
+                cursor.executemany("""
+                    INSERT INTO reconciliation_baseline_results
+                        (trans_id, core_amount, partner_amount, core_status, partner_status,
+                         recon_status, resolved, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, [tuple(row[key] for key in ("trans_id", "core_amount", "partner_amount", "core_status",
+                                                       "partner_status", "recon_status", "resolved", "created_at"))
+                      for row in legacy_rows])
+        cursor.execute("""
+            UPDATE audit_logs SET review_status = 'SUPERSEDED', approval_comment = 'Baseline restored'
+            WHERE review_status = 'PENDING'
+        """)
         cursor.execute("DELETE FROM reconciliation_results")
         cursor.execute('''
             INSERT INTO reconciliation_results
-                (trans_id, core_amount, partner_amount, core_status, partner_status, recon_status, resolved, created_at)
-            SELECT trans_id, core_amount, partner_amount, core_status, partner_status, recon_status, resolved, created_at
-            FROM reconciliation_baseline
+                (trans_id, core_amount, partner_amount, core_status, partner_status, recon_status,
+                 resolved, created_at, run_id)
+            SELECT trans_id, core_amount, partner_amount, core_status, partner_status, recon_status,
+                   resolved, created_at, run_id
+            FROM reconciliation_baseline_results
         ''')
-        conn.commit()
         count = cursor.execute("SELECT COUNT(*) FROM reconciliation_results").fetchone()[0]
+        cursor.execute("""
+            INSERT INTO audit_logs (trans_id, action_type, napas_ref_code, reason, performed_by,
+                                    review_status, approved_by, approved_at)
+            VALUES ('*', 'RESTORE_BASELINE', '-', 'Restored the initial reconciliation dataset', ?,
+                    'APPROVED', ?, CURRENT_TIMESTAMP)
+        """, (user["username"], user["username"]))
+        conn.commit()
         return {"status": "success", "count": count, "message": "Đã khôi phục danh sách ban đầu"}
     except Exception as error:
         conn.rollback()
         if isinstance(error, HTTPException):
             raise
-        raise HTTPException(status_code=500, detail=str(error))
+        logger.exception("Baseline restore failed")
+        raise HTTPException(status_code=500, detail="Could not restore the initial dataset") from error
     finally:
         conn.close()
 
@@ -207,9 +419,10 @@ class ResolveRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 @app.post("/api/resolve")
-def resolve_anomaly(req: ResolveRequest, username: str = Depends(require_auth)):
+def resolve_anomaly(req: ResolveRequest, user=Depends(require_role("admin", "operator"))):
     conn = get_db_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         ensure_audit_report_columns(conn)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM reconciliation_results WHERE trans_id = ?", (req.trans_id,))
@@ -221,29 +434,75 @@ def resolve_anomaly(req: ResolveRequest, username: str = Depends(require_auth)):
         if not req.napas_ref_code.strip() or not req.reason.strip():
             raise HTTPException(status_code=422, detail="Reference and reason are required")
 
-        cursor.execute("UPDATE reconciliation_results SET resolved = 1 WHERE trans_id = ?", (req.trans_id,))
+        pending = cursor.execute("""
+            SELECT 1 FROM audit_logs WHERE trans_id = ? AND run_id IS ? AND review_status = 'PENDING'
+        """, (req.trans_id, row["run_id"])).fetchone()
+        if pending:
+            raise HTTPException(status_code=409, detail="This transaction is already waiting for approval")
         cursor.execute('''
             INSERT INTO audit_logs
                 (trans_id, action_type, napas_ref_code, reason, performed_by,
-                 core_amount, partner_amount, core_status, partner_status, recon_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 core_amount, partner_amount, core_status, partner_status, recon_status, run_id, review_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
         ''', (
-            req.trans_id, req.action_type, req.napas_ref_code.strip(), req.reason.strip(), username,
+            req.trans_id, req.action_type, req.napas_ref_code.strip(), req.reason.strip(), user["username"],
             row["core_amount"], row["partner_amount"], row["core_status"], row["partner_status"], row["recon_status"],
+            row["run_id"],
         ))
         conn.commit()
-        return {"status": "success", "message": "Transaction review saved"}
+        return {"status": "success", "message": "Review submitted for approval"}
     except HTTPException:
         conn.rollback()
         raise
     except Exception as error:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=str(error))
+        logger.exception("Anomaly review submission failed")
+        raise HTTPException(status_code=500, detail="Could not submit the review request") from error
     finally:
         conn.close()
 
+
+@app.post("/api/audit-logs/{log_id}/decision")
+def decide_audit_log(log_id: int, req: AuditDecisionRequest, user=Depends(require_role("admin", "approver"))):
+    if req.decision == "REJECT" and not req.comment.strip():
+        raise HTTPException(status_code=422, detail="A rejection reason is required")
+    conn = get_db_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        audit = conn.execute("SELECT * FROM audit_logs WHERE log_id = ?", (log_id,)).fetchone()
+        if audit is None:
+            raise HTTPException(status_code=404, detail="Review request not found")
+        if audit["review_status"] != "PENDING":
+            raise HTTPException(status_code=409, detail="Review request has already been decided")
+        if audit["performed_by"].casefold() == user["username"].casefold():
+            raise HTTPException(status_code=409, detail="The person who submitted a review cannot approve it")
+        decision = "APPROVED" if req.decision == "APPROVE" else "REJECTED"
+        conn.execute("""
+            UPDATE audit_logs SET review_status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP,
+                   approval_comment = ?
+            WHERE log_id = ? AND review_status = 'PENDING'
+        """, (decision, user["username"], req.comment.strip(), log_id))
+        if req.decision == "APPROVE":
+            conn.execute("""
+                UPDATE reconciliation_results SET resolved = 1
+                WHERE trans_id = ? AND run_id IS ? AND resolved = 0
+            """, (audit["trans_id"], audit["run_id"]))
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise HTTPException(status_code=409, detail="Transaction is no longer awaiting resolution")
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as error:
+        conn.rollback()
+        logger.exception("Audit review decision failed")
+        raise HTTPException(status_code=500, detail="Could not save the review decision") from error
+    finally:
+        conn.close()
+    return {"status": "success", "review_status": decision}
+
 @app.get("/api/reports/resolved.csv")
-def export_resolved_report(_username: str = Depends(require_auth)):
+def export_resolved_report(_user=Depends(current_user)):
     conn = get_db_connection()
     try:
         ensure_audit_report_columns(conn)
@@ -255,10 +514,11 @@ def export_resolved_report(_username: str = Depends(require_auth)):
                    COALESCE(a.core_status, r.core_status) AS core_status,
                    COALESCE(a.partner_status, r.partner_status) AS partner_status,
                    COALESCE(a.recon_status, r.recon_status) AS recon_status,
-                   a.action_type, a.napas_ref_code, a.reason, a.performed_by, a.created_at
+                   a.action_type, a.napas_ref_code, a.reason, a.performed_by, a.created_at, a.run_id,
+                   a.review_status, a.approved_by, a.approved_at, a.approval_comment
             FROM audit_logs AS a
             LEFT JOIN reconciliation_results AS r
-                ON r.trans_id = a.trans_id AND r.created_at <= a.created_at
+                ON r.trans_id = a.trans_id AND r.run_id = a.run_id
             ORDER BY a.created_at ASC, a.log_id ASC
         ''')
     except Exception:
@@ -268,7 +528,8 @@ def export_resolved_report(_username: str = Depends(require_auth)):
     headers = [
             "Mã log", "Mã giao dịch", "Tiền Core", "Tiền Napas", "Trạng thái Core",
             "Trạng thái Napas", "Kết quả đối soát", "Hình thức xử lý", "Mã tham chiếu Napas",
-            "Lý do/Ghi chú", "Nhân viên thực hiện", "Thời gian xử lý",
+            "Lý do/Ghi chú", "Nhân viên đề xuất", "Thời gian đề xuất", "Mã lần đối soát",
+            "Trạng thái duyệt", "Người duyệt", "Thời gian duyệt", "Ghi chú phê duyệt",
     ]
 
     def stream_report():
@@ -285,7 +546,9 @@ def export_resolved_report(_username: str = Depends(require_auth)):
                     csv_safe_text(row["core_status"]), csv_safe_text(row["partner_status"]),
                     csv_safe_text(row["recon_status"]), csv_safe_text(row["action_type"]),
                     csv_safe_text(row["napas_ref_code"]), csv_safe_text(row["reason"]),
-                    csv_safe_text(row["performed_by"]), csv_safe_text(row["created_at"]),
+                    csv_safe_text(row["performed_by"]), csv_safe_text(row["created_at"]), csv_safe_text(row["run_id"]),
+                    csv_safe_text(row["review_status"]), csv_safe_text(row["approved_by"]),
+                    csv_safe_text(row["approved_at"]), csv_safe_text(row["approval_comment"]),
                 ])
                 yield buffer.getvalue()
                 buffer.seek(0)
@@ -300,13 +563,37 @@ def export_resolved_report(_username: str = Depends(require_auth)):
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 @app.get("/api/audit-logs")
-def get_audit_logs(_username: str = Depends(require_auth)):
+def get_audit_logs(
+    page: int = 1, page_size: int = 50, review_status: str = "", performed_by: str = "",
+    date_from: str = "", date_to: str = "", _user=Depends(current_user),
+):
+    page, page_size = _bounded_page(page, page_size, 200)
+    clauses, params = [], []
+    if review_status:
+        clauses.append("review_status = ?")
+        params.append(review_status)
+    if performed_by.strip():
+        clauses.append("performed_by LIKE ?")
+        params.append(f"%{performed_by.strip()}%")
+    for value, operator in ((date_from, ">="), (date_to, "<")):
+        if value:
+            try:
+                parsed = date.fromisoformat(value)
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail="Dates must use YYYY-MM-DD format") from error
+            bound = parsed.isoformat() if operator == ">=" else (parsed + timedelta(days=1)).isoformat()
+            clauses.append(f"created_at {operator} ?")
+            params.append(bound)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100")
-    rows = cursor.fetchall()
-    conn.close()
-    return {"status": "success", "count": len(rows), "data": [dict(row) for row in rows]}
+    try:
+        total = conn.execute(f"SELECT COUNT(*) FROM audit_logs{where}", params).fetchone()[0]
+        rows = conn.execute(f"SELECT * FROM audit_logs{where} ORDER BY created_at DESC, log_id DESC LIMIT ? OFFSET ?",
+                            [*params, page_size, (page - 1) * page_size]).fetchall()
+    finally:
+        conn.close()
+    return {"status": "success", "count": total, "page": page, "page_size": page_size,
+            "data": [dict(row) for row in rows]}
 
 def parse_uploaded_csv(filename: str | None, payload: bytes, label: str) -> pd.DataFrame:
     if not filename or Path(filename).suffix.lower() != ".csv":
@@ -321,11 +608,17 @@ def parse_uploaded_csv(filename: str | None, payload: bytes, label: str) -> pd.D
         normalized_header = [str(column).strip().lower() for column in header]
         if len(set(normalized_header)) != len(normalized_header):
             raise HTTPException(status_code=422, detail=f"{label} CSV has duplicate column names")
-        frame = pd.read_csv(BytesIO(payload), encoding="utf-8-sig", dtype={"trans_id": "string"})
+        frame = pd.read_csv(
+            BytesIO(payload), encoding="utf-8-sig", dtype={"trans_id": "string", "amount": "string"},
+            keep_default_na=False,
+        )
     except HTTPException:
         raise
     except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error, ValueError, StopIteration) as error:
-        raise HTTPException(status_code=422, detail=f"{label} CSV cannot be parsed: {error}") from error
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label} CSV cannot be parsed; verify its UTF-8 encoding and CSV quoting",
+        ) from error
 
     frame.columns = [str(column).strip().lower() for column in frame.columns]
     if len(set(frame.columns)) != len(frame.columns):
@@ -341,15 +634,20 @@ def parse_uploaded_csv(filename: str | None, payload: bytes, label: str) -> pd.D
     frame["trans_id"] = frame["trans_id"].astype("string").str.strip()
     if frame["trans_id"].isna().any() or frame["trans_id"].eq("").any():
         raise HTTPException(status_code=422, detail=f"{label} CSV contains a blank transaction ID")
+    if frame["trans_id"].str.len().gt(100).any():
+        raise HTTPException(status_code=422, detail=f"{label} transaction IDs must be 100 characters or fewer")
     if frame["trans_id"].duplicated().any():
         raise HTTPException(status_code=422, detail=f"{label} CSV contains duplicate transaction IDs")
 
-    frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce")
-    if frame["amount"].isna().any() or frame["amount"].lt(0).any() or not frame["amount"].map(math.isfinite).all():
-        raise HTTPException(status_code=422, detail=f"{label} CSV amounts must be valid non-negative numbers")
+    try:
+        frame["amount"] = reconcile_engine.normalize_vnd_amounts(frame["amount"], label)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     frame["status"] = frame["status"].astype("string").str.strip().str.upper()
     if frame["status"].isna().any() or frame["status"].eq("").any():
         raise HTTPException(status_code=422, detail=f"{label} CSV contains a blank status")
+    if frame["status"].str.len().gt(100).any():
+        raise HTTPException(status_code=422, detail=f"{label} statuses must be 100 characters or fewer")
     return frame
 
 
@@ -368,13 +666,14 @@ def atomic_write(path: Path, payload: bytes) -> None:
 
 
 @app.post("/api/upload-and-reconcile")
-async def upload_and_reconcile(
+def upload_and_reconcile(
     core_file: UploadFile = File(...),
     partner_file: UploadFile = File(...),
-    _username: str = Depends(require_auth),
+    expected_run_id: str = Form(default=""),
+    user=Depends(require_role("admin", "operator")),
 ):
-    core_payload = await core_file.read(config.MAX_UPLOAD_BYTES + 1)
-    partner_payload = await partner_file.read(config.MAX_UPLOAD_BYTES + 1)
+    core_payload = core_file.file.read(config.MAX_UPLOAD_BYTES + 1)
+    partner_payload = partner_file.file.read(config.MAX_UPLOAD_BYTES + 1)
     if len(core_payload) > config.MAX_UPLOAD_BYTES or len(partner_payload) > config.MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Each CSV file must be 10 MB or smaller")
 
@@ -389,14 +688,15 @@ async def upload_and_reconcile(
         (archive_dir / "core.csv").write_bytes(core_payload)
         (archive_dir / "partner.csv").write_bytes(partner_payload)
 
-        baseline_conn = get_db_connection()
         try:
-            ensure_initial_baseline(baseline_conn)
-            baseline_conn.commit()
-        finally:
-            baseline_conn.close()
-
-        reconcile_engine.replace_reconciliation_results(result_rows)
+            reconcile_engine.replace_reconciliation_results(
+                result_rows, run_id=run_id, performed_by=user["username"],
+                core_filename=Path(core_file.filename or "core.csv").name,
+                partner_filename=Path(partner_file.filename or "partner.csv").name,
+                expected_current_run_id=expected_run_id or None, enforce_expected=True,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         mirror_warning = None
         try:
             atomic_write(BASE_DIR / "core_log.csv", core_payload)
@@ -414,3 +714,31 @@ async def upload_and_reconcile(
     except Exception:
         shutil.rmtree(archive_dir, ignore_errors=True)
         raise
+
+
+@app.post("/api/upload-preview")
+def preview_upload(
+    core_file: UploadFile = File(...), partner_file: UploadFile = File(...),
+    _user=Depends(require_role("admin", "operator")),
+):
+    core_payload = core_file.file.read(config.MAX_UPLOAD_BYTES + 1)
+    partner_payload = partner_file.file.read(config.MAX_UPLOAD_BYTES + 1)
+    if len(core_payload) > config.MAX_UPLOAD_BYTES or len(partner_payload) > config.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Each CSV file must be 10 MB or smaller")
+    core = parse_uploaded_csv(core_file.filename, core_payload, "Core")
+    partner = parse_uploaded_csv(partner_file.filename, partner_payload, "Partner")
+    try:
+        rows = reconcile_engine.build_reconciliation_rows(core, partner)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row[5]] = counts.get(row[5], 0) + 1
+    conn = get_db_connection()
+    try:
+        current = conn.execute("SELECT run_id FROM reconciliation_results LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    return {"transaction_count": len(rows), "matched_count": counts.get("MATCHED", 0),
+            "discrepancy_count": len(rows) - counts.get("MATCHED", 0), "by_status": counts,
+            "current_run_id": current[0] if current else None}

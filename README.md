@@ -18,7 +18,9 @@ python -m uvicorn app:app --host 127.0.0.1 --port 8000 --reload
 
 Open `http://127.0.0.1:8000`. `setup_admin.py` prompts for an admin name and a password of at least 12 characters, stores an scrypt password hash, and creates a random JWT secret in the ignored `.env` file. Never commit or share `.env`.
 
-The local demo dataset can be regenerated with `python generate_data.py`, followed by `python reconcile_engine.py`. This replaces the active reconciliation dataset; back up the database first if its current state matters.
+Run the automated unit tests with `python -m unittest discover -s tests -v`.
+
+The local demo dataset can be regenerated with `python generate_data.py`, followed by `python reconcile_engine.py`. This records a new reconciliation run and replaces the active dataset; back up the database first if its current state matters.
 
 ## CSV upload contract
 
@@ -28,11 +30,17 @@ Both files must be UTF-8 CSV files of 10 MB or less, with at most 250,000 data r
 trans_id,amount,status
 ```
 
-Additional columns are allowed. IDs must be unique within each file; amounts must be finite, non-negative numbers; IDs and statuses must not be blank. Invalid files are rejected before the reconciliation table is changed.
+Additional columns are allowed. IDs must be unique within each file and no longer than 100 characters; statuses must be nonblank and no longer than 100 characters. Amounts must be whole, non-negative VND values no greater than 9,007,199,254,740,991. The amount limit keeps integer values exact through the current SQLite/API numeric representation. Fractional amounts are rejected. Invalid files are rejected before the reconciliation table is changed. Statuses are trimmed and uppercased; matching is based on exact normalized status equality, so configure upstream status mapping before using feeds with different status vocabularies.
+
+The upload dialog validates both files and shows a reconciliation summary before replacing the active dataset. Each successful run stores its source filenames, operator, totals, and a transaction snapshot. The **Reconciliation History** tab can view prior run summaries and transaction details. The initial dataset (including an empty initial dataset) is captured once as the restore baseline.
+
+Review actions are submitted by an administrator or operator and remain pending until a different administrator or approver approves or rejects them. Only approved reviews are marked resolved. The admin account created by `setup_admin.py` can create administrator, operator, and approver accounts in **Account Management** and disable accounts; disabled users lose access immediately. Account records and roles are stored in the SQLite database.
+
+Approving `FORCE_SUCCESS` or `REFUND` records the reconciliation decision and closes the review item; it does not send a payment, refund, or reversal instruction to a bank system.
 
 ## Reports and backups
 
-The **Audit Logs** tab exports the full audit history as UTF-8 with BOM CSV, suitable for Excel. New audit rows snapshot the transaction amounts, statuses, and reconciliation result at the time of resolution. Older audit rows created before this schema change do not have those snapshots; report values are joined to a matching current reconciliation row when its timestamp shows it existed at the time, otherwise those historical fields remain blank. Report fields have CR/LF stripped and are CSV-quoted; spreadsheet formula prefixes are escaped.
+The **Audit Logs** tab exports the full audit history as UTF-8 with BOM CSV, suitable for Excel. Audit rows keep a snapshot of transaction values, the reconciliation run ID, proposer, decision, approver, and approval note. Older rows from before run history was added may have a blank run ID or missing snapshots. Report fields have CR/LF stripped and are CSV-quoted; spreadsheet formula prefixes are escaped.
 
 Create a consistent SQLite backup with:
 
@@ -54,8 +62,8 @@ The container does not include the local development database or CSV files. Migr
 
 ## Security and current deployment limits
 
-- The application has one environment-configured admin account and basic per-process login throttling. It does not yet support individual staff accounts, role-based access, distributed throttling, or token revocation. Use a VPN or trusted network and add those controls before broad internet exposure.
-- Authentication uses HS256 Bearer JWTs and scrypt password hashes from the Python standard library. Tokens expire; logout removes the browser's session token, but issued tokens cannot be revoked before expiry.
+- Login throttling is stored in SQLite and shared across workers using the same database. Deploy behind a VPN or trusted network and add monitoring before broader exposure.
+- Authentication uses HS256 Bearer JWTs and scrypt password hashes from the Python standard library. Tokens expire; disabling an account invalidates its tokens immediately, while individual token revocation is not supported.
 - SQLite and one Uvicorn worker suit a small single-instance deployment. Use PostgreSQL and a managed deployment if concurrent use or availability requirements grow.
 - Configure HTTPS, firewall rules, secret rotation, database backup retention, and monitoring on the deployment host. Keep `.env`, SQLite files, upload archives, and backups private.
 - Bootstrap, Bootstrap Icons, and Chart.js are loaded from public CDNs by the HTML page. For offline or strict environments, vendor these assets locally and review their update process.

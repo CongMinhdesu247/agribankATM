@@ -34,17 +34,26 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, encoded_hash: str) -> bool:
+    if not isinstance(encoded_hash, str) or len(encoded_hash) > 256:
+        return False
     try:
+        # The hash comes from the local database. Still validate its work factors
+        # before passing them to scrypt so a damaged/tampered DB cannot request
+        # arbitrarily large CPU or memory allocations during login.
         algorithm, n, r, p, salt_value, digest_value = encoded_hash.split("$", 5)
-        if algorithm != "scrypt":
+        if (algorithm != "scrypt" or int(n) != SCRYPT_N or int(r) != SCRYPT_R
+                or int(p) != SCRYPT_P):
             return False
         expected = _b64decode(digest_value)
+        salt = _b64decode(salt_value)
+        if len(expected) != SCRYPT_LENGTH or len(salt) != 16:
+            return False
         actual = hashlib.scrypt(
-            password.encode("utf-8"), salt=_b64decode(salt_value),
-            n=int(n), r=int(r), p=int(p), dklen=len(expected),
+            password.encode("utf-8"), salt=salt,
+            n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=SCRYPT_LENGTH,
         )
         return hmac.compare_digest(actual, expected)
-    except (ValueError, TypeError, MemoryError):
+    except (ValueError, TypeError, AttributeError, MemoryError, OverflowError):
         return False
 
 
@@ -68,6 +77,8 @@ def create_access_token(username: str) -> tuple[str, int]:
 
 def verify_access_token(token: str) -> str | None:
     try:
+        if not token or len(token) > 4096:
+            return None
         header_part, payload_part, signature_part = token.split(".", 2)
         unsigned = f"{header_part}.{payload_part}"
         expected = hmac.new(config.JWT_SECRET.encode(), unsigned.encode("ascii"), hashlib.sha256).digest()
