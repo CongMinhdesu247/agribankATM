@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import date, datetime, timedelta
 import csv
 import hashlib
+import hmac
 import io
 import logging
 import os
@@ -12,7 +13,7 @@ import uuid
 from io import BytesIO
 from typing import Literal
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field
 import sqlite3
 import config
 import reconcile_engine
+from request_limits import RequestBodyLimitMiddleware
 from security import create_access_token, hash_password, verify_access_token, verify_password
 
 logger = logging.getLogger(__name__)
@@ -49,13 +51,32 @@ def seed_admin_user() -> None:
 
 @app.middleware("http")
 async def set_security_headers(request: Request, call_next):
-    response = await call_next(request)
+    request_id = uuid.uuid4().hex
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("Request failed request_id=%s", request_id)
+        raise
+    response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith(("/api/", "/health/")):
         response.headers["Cache-Control"] = "no-store"
+    if not request.url.path.startswith("/health/"):
+        logger.info(
+            "http_request request_id=%s method=%s status=%s elapsed_ms=%.1f",
+            request_id, request.method, response.status_code, (time.perf_counter() - started_at) * 1000,
+        )
     return response
+
+
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_upload_body_bytes=(2 * config.MAX_UPLOAD_BYTES) + 1024 * 1024,
+)
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=50)
@@ -79,10 +100,21 @@ class AuditDecisionRequest(BaseModel):
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Bearer token required", headers={"WWW-Authenticate": "Bearer"})
-    username = verify_access_token(credentials.credentials)
+def current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+):
+    if credentials is not None and credentials.scheme.lower() == "bearer":
+        username = verify_access_token(credentials.credentials)
+    else:
+        username = request.cookies.get("agribank_access")
+        if username:
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                origin = request.headers.get("origin", "").rstrip("/")
+                expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+                if not origin or origin != expected_origin:
+                    raise HTTPException(status_code=403, detail="Cross-origin request rejected")
+            username = verify_access_token(username)
     if username is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
     conn = get_db_connection()
@@ -95,6 +127,11 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bear
     if user is None or not user["is_active"]:
         raise HTTPException(status_code=401, detail="Invalid or disabled account", headers={"WWW-Authenticate": "Bearer"})
     return {"username": user["username"], "role": user["role"]}
+
+
+@app.get("/api/me")
+def get_current_user(user=Depends(current_user)):
+    return user
 
 
 def require_role(*allowed_roles: str):
@@ -160,37 +197,65 @@ def set_user_active(username: str, req: UserActiveRequest, user=Depends(require_
     return {"status": "success", "username": target["username"], "is_active": req.is_active}
 
 @app.post("/api/login")
-def login(req: LoginRequest, request: Request):
+def login(req: LoginRequest, request: Request, response: Response):
     now = time.time()
     client_ip = request.client.host if request.client else "unknown"
-    ip_hash = hashlib.sha256(f"{config.JWT_SECRET}:{client_ip}".encode("utf-8")).hexdigest()
+    ip_hash = hmac.new(config.JWT_SECRET.encode(), f"login-ip:{client_ip}".encode("utf-8"), hashlib.sha256).hexdigest()
+    username = req.username.strip().casefold()
+    username_hash = hmac.new(
+        config.JWT_SECRET.encode(), f"login-user:{username}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()
     conn = get_db_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (now - 300,))
-        attempts = conn.execute(
+        conn.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (now - 900,))
+        ip_attempts = conn.execute(
             "SELECT COUNT(*) FROM login_attempts WHERE ip_hash = ? AND attempted_at >= ?",
             (ip_hash, now - 300),
         ).fetchone()[0]
-        if attempts >= 5:
+        account_attempts = conn.execute(
+            "SELECT COUNT(*) FROM login_attempts WHERE username_hash = ? AND attempted_at >= ?",
+            (username_hash, now - 900),
+        ).fetchone()[0]
+        if ip_attempts >= 20 or account_attempts >= 10:
             conn.commit()
-            raise HTTPException(status_code=429, detail="Too many failed login attempts; try again in five minutes")
+            logger.warning("login_rejected request_id=%s reason=throttled", request.state.request_id)
+            raise HTTPException(status_code=429, detail="Too many failed login attempts; try again later")
         user = conn.execute(
             "SELECT username, password_hash, role, is_active FROM app_users WHERE username = ? COLLATE NOCASE",
             (req.username.strip(),),
         ).fetchone()
         password_ok = verify_password(req.password, user["password_hash"] if user else config.APP_PASSWORD_HASH)
         if user is None or not user["is_active"] or not password_ok:
-            conn.execute("INSERT INTO login_attempts (ip_hash, attempted_at) VALUES (?, ?)", (ip_hash, now))
+            conn.execute(
+                "INSERT INTO login_attempts (ip_hash, username_hash, attempted_at) VALUES (?, ?, ?)",
+                (ip_hash, username_hash, now),
+            )
             conn.commit()
+            logger.warning("login_rejected request_id=%s reason=invalid_credentials", request.state.request_id)
             raise HTTPException(status_code=401, detail="Invalid username or password")
-        conn.execute("DELETE FROM login_attempts WHERE ip_hash = ?", (ip_hash,))
+        conn.execute("DELETE FROM login_attempts WHERE ip_hash = ? OR username_hash = ?", (ip_hash, username_hash))
         conn.commit()
     finally:
         conn.close()
     token, expires_in = create_access_token(user["username"])
-    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in,
+    response.set_cookie(
+        key="agribank_access", value=token, max_age=expires_in, httponly=True,
+        secure=config.COOKIE_SECURE or request.url.scheme == "https", samesite="strict", path="/",
+    )
+    logger.info("login_succeeded request_id=%s", request.state.request_id)
+    return {"token_type": "cookie", "expires_in": expires_in,
             "username": user["username"], "role": user["role"]}
+
+
+@app.post("/api/logout")
+def logout(request: Request, response: Response, _user=Depends(current_user)):
+    response.delete_cookie(
+        key="agribank_access", path="/", secure=config.COOKIE_SECURE or request.url.scheme == "https",
+        httponly=True, samesite="strict",
+    )
+    logger.info("logout_succeeded request_id=%s", request.state.request_id)
+    return {"status": "ok"}
 
 # Serve static assets from the project directory.
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -212,6 +277,24 @@ def get_db_connection():
 
 
 seed_admin_user()
+
+
+@app.get("/health/live")
+def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def health_ready():
+    conn = get_db_connection()
+    try:
+        conn.execute("SELECT 1").fetchone()
+    except sqlite3.Error as error:
+        logger.exception("Readiness check failed")
+        raise HTTPException(status_code=503, detail="Database is not ready") from error
+    finally:
+        conn.close()
+    return {"status": "ready"}
 
 def ensure_audit_report_columns(conn):
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_logs)")}

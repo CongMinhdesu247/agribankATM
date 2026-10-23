@@ -469,18 +469,17 @@
         let allTransactions = [], currentTransactionPage = 1, totalTransactions = 0;
         let currentAuditPage = 1, totalAuditLogs = 0, currentRunsPage = 1, totalRuns = 0;
         let currentRunId = '', currentRunPage = 1, currentRunCount = 0;
-        let currentUserRole = sessionStorage.getItem('agribank_role') || '';
+        let currentUserRole = '';
         let transactionFilterTimer = null;
-        let accessToken = sessionStorage.getItem('agribank_access_token') || '';
         const TRANSACTIONS_PER_PAGE = 100;
 
         async function apiFetch(url, options = {}) {
             const headers = new Headers(options.headers || {});
-            if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
-            const response = await fetch(url, { ...options, headers, cache: options.cache || 'no-store' });
-            if (response.status === 401 && accessToken) {
-                accessToken = '';
-                sessionStorage.removeItem('agribank_access_token');
+            const response = await fetch(url, {
+                ...options, headers, cache: options.cache || 'no-store',
+                credentials: options.credentials || 'same-origin'
+            });
+            if (response.status === 401 && sessionStorage.getItem('agribank_user')) {
                 sessionStorage.removeItem('agribank_user');
                 sessionStorage.removeItem('agribank_role');
                 loginModal?.show();
@@ -495,16 +494,23 @@
             checkAuth();
         });
 
-        function checkAuth() {
-            const user = sessionStorage.getItem('agribank_user');
-            currentUserRole = sessionStorage.getItem('agribank_role') || '';
-            applyRoleVisibility();
-            if (!accessToken) {
+        async function checkAuth() {
+            const response = await apiFetch(`${API_URL}/me`);
+            if (!response.ok) {
+                sessionStorage.removeItem('agribank_user');
+                sessionStorage.removeItem('agribank_role');
+                currentUserRole = '';
+                applyRoleVisibility();
                 loginModal.show();
-            } else {
-                document.getElementById('current-user-display').textContent = user || 'Cán bộ IT';
-                loadData().catch(error => console.error('Không tải được dữ liệu:', error));
+                return;
             }
+            const user = await response.json();
+            currentUserRole = user.role;
+            sessionStorage.setItem('agribank_user', user.username);
+            sessionStorage.setItem('agribank_role', user.role);
+            applyRoleVisibility();
+            document.getElementById('current-user-display').textContent = user.username;
+            await loadData();
         }
 
         async function handleLogin(e) {
@@ -516,12 +522,11 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username, password }),
-                    cache: 'no-store'
+                    cache: 'no-store',
+                    credentials: 'same-origin'
                 });
                 const result = await response.json();
                 if (!response.ok) throw new Error(result.detail || 'Đăng nhập thất bại.');
-                accessToken = result.access_token;
-                sessionStorage.setItem('agribank_access_token', accessToken);
                 sessionStorage.setItem('agribank_user', result.username);
                 sessionStorage.setItem('agribank_role', result.role);
                 currentUserRole = result.role;
@@ -535,9 +540,12 @@
             }
         }
 
-        function logout() {
-            accessToken = '';
-            sessionStorage.removeItem('agribank_access_token');
+        async function logout() {
+            try {
+                await apiFetch(`${API_URL}/logout`, { method: 'POST' });
+            } catch (error) {
+                console.error('Đăng xuất không hoàn tất ở máy chủ:', error);
+            }
             sessionStorage.removeItem('agribank_user');
             sessionStorage.removeItem('agribank_role');
             location.reload();

@@ -126,7 +126,12 @@ def initialize_database() -> None:
             );
             CREATE TABLE IF NOT EXISTS login_attempts (
                 ip_hash TEXT NOT NULL,
+                username_hash TEXT,
                 attempted_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_reconciliation_status_resolved
                 ON reconciliation_results (recon_status, resolved);
@@ -139,12 +144,14 @@ def initialize_database() -> None:
         _ensure_column(conn, "audit_logs", "approved_by", "TEXT")
         _ensure_column(conn, "audit_logs", "approved_at", "TEXT")
         _ensure_column(conn, "audit_logs", "approval_comment", "TEXT")
+        _ensure_column(conn, "login_attempts", "username_hash", "TEXT")
         _ensure_audit_snapshot_columns(conn)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_audit_logs_review_lookup
             ON audit_logs (trans_id, run_id, review_status)
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time ON login_attempts (ip_hash, attempted_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time ON login_attempts (username_hash, attempted_at)")
         baseline_exists = conn.execute(
             "SELECT 1 FROM reconciliation_baseline_state WHERE baseline_id = 1"
         ).fetchone()
@@ -183,6 +190,7 @@ def initialize_database() -> None:
                          recon_status, resolved, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, snapshot_rows)
+        conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, CURRENT_TIMESTAMP)")
         conn.commit()
 def _ensure_column(conn: sqlite3.Connection, table: str, name: str, column_type: str) -> None:
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}

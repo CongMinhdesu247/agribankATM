@@ -18,6 +18,8 @@ python -m uvicorn app:app --host 127.0.0.1 --port 8000 --reload
 
 Open `http://127.0.0.1:8000`. `setup_admin.py` prompts for an admin name and a password of at least 12 characters, stores an scrypt password hash, and creates a random JWT secret in the ignored `.env` file. Never commit or share `.env`.
 
+The server exposes `/health/live` and `/health/ready` for process and database health checks. HTTP responses include an `X-Request-ID`; request logs record method, status, duration, and authentication outcomes without logging request bodies or passwords.
+
 Run the automated unit tests with `python -m unittest discover -s tests -v`.
 
 The local demo dataset can be regenerated with `python generate_data.py`, followed by `python reconcile_engine.py`. This records a new reconciliation run and replaces the active dataset; back up the database first if its current state matters.
@@ -50,9 +52,33 @@ python backup_db.py
 
 The default output folder is `backups/`. For scheduled backups, use Windows Task Scheduler or the host's backup service, and copy backups to storage separate from the application host. Restore by stopping the application and replacing the configured SQLite database with a verified backup.
 
-## Container deployment
+Uploaded source CSV files contain transaction data and are archived under `UPLOAD_DIR`. Inspect expired archive candidates with `python cleanup_uploads.py --retention-days 90`; delete them only after reviewing the list with `python cleanup_uploads.py --retention-days 90 --apply`. Schedule the reviewed command according to your retention policy.
 
-Create the private `.env` file as in Local setup, then configure the database and uploads on persistent storage. Docker Compose uses a persistent named volume and one worker because SQLite is intended for a single application instance:
+## Deploy on Railway
+
+Push the project to a private GitHub repository, then create a Railway project from that repository. Railway detects the root `Dockerfile`. The container reads Railway's `PORT` variable and listens on `0.0.0.0`; the Railway health check is `/health/ready`.
+
+Before the first deploy, configure the service:
+
+1. Add a Railway Volume mounted at `/data`.
+2. Set `RAILWAY_RUN_UID=0`. The entrypoint prepares the mounted directory and then drops the web process to the unprivileged `appuser` account.
+3. Set these service variables:
+
+   ```text
+   DATABASE_URL=sqlite:////data/agribank_recon.db
+   UPLOAD_DIR=/data/uploads
+   COOKIE_SECURE=true
+   MAX_UPLOAD_BYTES=10485760
+   ```
+
+4. Generate the initial admin values locally with `python setup_admin.py`, then add `APP_USERNAME`, `APP_PASSWORD_HASH`, and `JWT_SECRET` from the private local `.env` to Railway Variables. Use a unique password and a randomly generated secret; never commit `.env` or paste its contents into GitHub.
+5. Set the Railway health check path to `/health/ready`, generate a public domain, and keep the service at one replica. This app uses SQLite, which is suitable only for one running instance and one attached data volume.
+
+The Railway volume stores both SQLite data and uploaded CSV archives across deployments. Make and download backups regularly, and test restoring one before storing important data. Railway's volume is mounted at runtime, so initialization and writes happen from the start command, not during the image build. For bank or other sensitive transaction data, confirm your privacy, access, retention, and incident response requirements before making the service public.
+
+## Local container deployment
+
+Docker Compose uses a persistent named volume and one worker because SQLite is intended for a single application instance:
 
 ```powershell
 docker compose up --build -d
@@ -62,9 +88,10 @@ The container does not include the local development database or CSV files. Migr
 
 ## Security and current deployment limits
 
-- Login throttling is stored in SQLite and shared across workers using the same database. Deploy behind a VPN or trusted network and add monitoring before broader exposure.
-- Authentication uses HS256 Bearer JWTs and scrypt password hashes from the Python standard library. Tokens expire; disabling an account invalidates its tokens immediately, while individual token revocation is not supported.
-- SQLite and one Uvicorn worker suit a small single-instance deployment. Use PostgreSQL and a managed deployment if concurrent use or availability requirements grow.
+- Login throttling is stored in SQLite and shared across workers using the same database: 20 failed attempts per IP in five minutes and 10 attempts per account in 15 minutes. Deploy behind a VPN or trusted network and monitor repeated failures.
+- Browser sessions use an `HttpOnly`, `SameSite=Strict` JWT cookie; `COOKIE_SECURE=true` forces the `Secure` flag behind Railway's HTTPS proxy. Unsafe cookie-authenticated API requests require a same-origin `Origin` header. Bearer tokens remain supported for API clients. Password hashes use scrypt; tokens expire and disabling an account invalidates its tokens immediately. Individual token revocation is not supported.
+- The application rejects upload requests larger than two configured file limits plus multipart overhead, including chunked request bodies. Keep an equivalent body-size and connection-timeout limit at any public reverse proxy.
+- The schema has a migration-version ledger. SQLite and one Uvicorn worker suit a small single-instance deployment. Use PostgreSQL and a managed deployment if concurrent use or availability requirements grow.
 - Configure HTTPS, firewall rules, secret rotation, database backup retention, and monitoring on the deployment host. Keep `.env`, SQLite files, upload archives, and backups private.
 - Bootstrap, Bootstrap Icons, and Chart.js are loaded from public CDNs by the HTML page. For offline or strict environments, vendor these assets locally and review their update process.
 

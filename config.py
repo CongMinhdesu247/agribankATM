@@ -33,6 +33,7 @@ JWT_SECRET = os.getenv("JWT_SECRET", "")
 APP_USERNAME = os.getenv("APP_USERNAME", "")
 APP_PASSWORD_HASH = os.getenv("APP_PASSWORD_HASH", "")
 ACCESS_TOKEN_TTL_MINUTES = int(os.getenv("ACCESS_TOKEN_TTL_MINUTES", "60"))
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
 _upload_dir = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "uploads")))
 UPLOAD_DIR = _upload_dir.resolve() if _upload_dir.is_absolute() else (BASE_DIR / _upload_dir).resolve()
 MAX_UPLOAD_BYTES = min(int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))), 10 * 1024 * 1024)

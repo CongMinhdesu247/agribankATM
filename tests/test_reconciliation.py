@@ -97,6 +97,7 @@ class ReconciliationStorageTests(unittest.TestCase):
                 self.assertIn("run_id", result_columns)
                 self.assertIn("review_status", audit_columns)
                 self.assertIn("approval_comment", audit_columns)
+                self.assertEqual(connection.execute("SELECT version FROM schema_migrations").fetchone(), (1,))
                 self.assertEqual(connection.execute("SELECT trans_id FROM reconciliation_baseline_results").fetchone(), ("BASE-1",))
                 self.assertEqual(connection.execute(
                     "SELECT transaction_count FROM reconciliation_baseline_state WHERE baseline_id = 1"

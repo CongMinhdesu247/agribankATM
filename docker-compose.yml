@@ -2,6 +2,8 @@ services:
   agribank-review:
     build: .
     env_file: .env
+    # The entrypoint prepares the mounted volume, then drops privileges to appuser.
+    user: "0:0"
     environment:
       DATABASE_URL: sqlite:////data/agribank_recon.db
       UPLOAD_DIR: /data/uploads
@@ -10,6 +12,12 @@ services:
     volumes:
       - agribank_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 volumes:
   agribank_data:
