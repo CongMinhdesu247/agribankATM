@@ -402,7 +402,7 @@ def list_reconciliation_runs(page: int = 1, page_size: int = 25, _user=Depends(c
         total = conn.execute("SELECT COUNT(*) FROM reconciliation_runs").fetchone()[0]
         rows = conn.execute("""
             SELECT run_id, created_at, performed_by, core_filename, partner_filename,
-                   transaction_count, matched_count, discrepancy_count
+                   transaction_count, matched_count, discrepancy_count, closed_at, closed_by
             FROM reconciliation_runs ORDER BY created_at DESC, run_id DESC LIMIT ? OFFSET ?
         """, (page_size, (page - 1) * page_size)).fetchall()
     finally:
@@ -419,8 +419,13 @@ def get_reconciliation_run(run_id: str, page: int = 1, page_size: int = 100, _us
         if run is None:
             raise HTTPException(status_code=404, detail="Reconciliation run not found")
         rows = conn.execute("""
-            SELECT trans_id, core_amount, partner_amount, core_status, partner_status, recon_status
-            FROM reconciliation_run_results WHERE run_id = ? ORDER BY trans_id LIMIT ? OFFSET ?
+            SELECT s.trans_id, s.core_amount, s.partner_amount, s.core_status, s.partner_status, s.recon_status,
+                   CASE WHEN s.recon_status = 'MATCHED' THEN 'MATCHED'
+                        WHEN s.resolved = 1 THEN 'APPROVED'
+                        WHEN EXISTS (SELECT 1 FROM audit_logs a WHERE a.run_id = s.run_id
+                                     AND a.trans_id = s.trans_id AND a.review_status = 'PENDING') THEN 'PENDING'
+                        ELSE 'UNPROCESSED' END AS processing_status
+            FROM reconciliation_run_results s WHERE s.run_id = ? ORDER BY s.trans_id LIMIT ? OFFSET ?
         """, (run_id, page_size, (page - 1) * page_size)).fetchall()
     finally:
         conn.close()
@@ -492,60 +497,34 @@ def get_transactions(page: int = 1, page_size: int = 100, _user=Depends(current_
     return {"status": "success", "count": total, "page": page, "page_size": page_size,
             "data": [dict(row) for row in rows]}
 
-@app.post("/api/restore-baseline")
-def restore_baseline(user=Depends(require_role("admin"))):
+@app.get("/api/workflow")
+def get_workflow(_user=Depends(current_user)):
     conn = get_db_connection()
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        cursor = conn.cursor()
-        state = cursor.execute("SELECT 1 FROM reconciliation_baseline_state WHERE baseline_id = 1").fetchone()
-        if state is None:
-            legacy_rows = cursor.execute("SELECT * FROM reconciliation_baseline").fetchall()
-            cursor.execute("""
-                INSERT INTO reconciliation_baseline_state (baseline_id, captured_at, transaction_count)
-                VALUES (1, CURRENT_TIMESTAMP, ?)
-            """, (len(legacy_rows),))
-            if legacy_rows:
-                cursor.executemany("""
-                    INSERT INTO reconciliation_baseline_results
-                        (trans_id, core_amount, partner_amount, core_status, partner_status,
-                         recon_status, resolved, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, [tuple(row[key] for key in ("trans_id", "core_amount", "partner_amount", "core_status",
-                                                       "partner_status", "recon_status", "resolved", "created_at"))
-                      for row in legacy_rows])
-        cursor.execute("""
-            UPDATE audit_logs SET review_status = 'SUPERSEDED', approval_comment = 'Baseline restored'
-            WHERE review_status = 'PENDING'
-        """)
-        cursor.execute("DELETE FROM reconciliation_results")
-        cursor.execute('''
-            INSERT INTO reconciliation_results
-                (trans_id, core_amount, partner_amount, core_status, partner_status, recon_status,
-                 resolved, created_at, run_id)
-            SELECT trans_id, core_amount, partner_amount, core_status, partner_status, recon_status,
-                   resolved, created_at, run_id
-            FROM reconciliation_baseline_results
-        ''')
-        count = cursor.execute("SELECT COUNT(*) FROM reconciliation_results").fetchone()[0]
-        cursor.execute("""
-            INSERT INTO audit_logs (trans_id, action_type, napas_ref_code, reason, performed_by,
-                                    review_status, approved_by, approved_at)
-            VALUES ('*', 'RESTORE_BASELINE', '-', 'Restored the initial reconciliation dataset', ?,
-                    'APPROVED', ?, CURRENT_TIMESTAMP)
-        """, (user["username"], user["username"]))
-        conn.commit()
-        return {"status": "success", "count": count, "message": "Đã khôi phục danh sách ban đầu"}
-    except Exception as error:
-        conn.rollback()
-        if isinstance(error, HTTPException):
-            raise
-        logger.exception("Baseline restore failed")
-        raise HTTPException(status_code=500, detail="Could not restore the initial dataset") from error
+        return reconcile_engine.current_workflow(conn)
     finally:
         conn.close()
 
+
+class CloseRunRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=100)
+
+
+@app.post("/api/close-run")
+def close_run(req: CloseRunRequest, user=Depends(require_role("admin"))):
+    try:
+        return reconcile_engine.close_reconciliation_run(req.run_id, user["username"])
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/restore-baseline")
+def restore_baseline(_user=Depends(require_role("admin"))):
+    raise HTTPException(status_code=410, detail="Khôi phục dữ liệu gốc đã ngừng dùng. Vui lòng hoàn tất và đóng đợt hiện tại trước khi tải cặp file mới.")
+
+
 class ResolveRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=100)
     trans_id: str = Field(min_length=1, max_length=100)
     action_type: Literal["FORCE_SUCCESS", "REFUND"]
     napas_ref_code: str = Field(min_length=1, max_length=100)
@@ -556,12 +535,18 @@ def resolve_anomaly(req: ResolveRequest, user=Depends(require_role("admin", "ope
     conn = get_db_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        try:
+            reconcile_engine.assert_run_open(conn, req.run_id)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         ensure_audit_report_columns(conn)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM reconciliation_results WHERE trans_id = ?", (req.trans_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Transaction not found")
+        if row["run_id"] != req.run_id:
+            raise HTTPException(status_code=409, detail="Giao dịch không thuộc đợt đang xử lý. Vui lòng tải lại dữ liệu.")
         if row["recon_status"] == "MATCHED" or row["resolved"]:
             raise HTTPException(status_code=409, detail="Transaction is not pending review")
         if not req.napas_ref_code.strip() or not req.reason.strip():
@@ -607,6 +592,10 @@ def decide_audit_log(log_id: int, req: AuditDecisionRequest, user=Depends(requir
             raise HTTPException(status_code=404, detail="Review request not found")
         if audit["review_status"] != "PENDING":
             raise HTTPException(status_code=409, detail="Review request has already been decided")
+        try:
+            reconcile_engine.assert_run_open(conn, audit["run_id"])
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         if audit["performed_by"].casefold() == user["username"].casefold():
             raise HTTPException(status_code=409, detail="The person who submitted a review cannot approve it")
         decision = "APPROVED" if req.decision == "APPROVE" else "REJECTED"
@@ -622,6 +611,8 @@ def decide_audit_log(log_id: int, req: AuditDecisionRequest, user=Depends(requir
             """, (audit["trans_id"], audit["run_id"]))
             if updated.rowcount != 1:
                 raise HTTPException(status_code=409, detail="Transaction is no longer awaiting resolution")
+            conn.execute("""UPDATE reconciliation_run_results SET resolved = 1
+                WHERE run_id = ? AND trans_id = ?""", (audit["run_id"], audit["trans_id"]))
         conn.commit()
     except HTTPException:
         conn.rollback()
@@ -816,7 +807,7 @@ def upload_and_reconcile(
     core_file: UploadFile = File(...),
     partner_file: UploadFile = File(...),
     expected_run_id: str = Form(default=""),
-    user=Depends(require_role("admin", "operator")),
+    user=Depends(require_role("admin")),
 ):
     core_payload = core_file.file.read(config.MAX_UPLOAD_BYTES + 1)
     partner_payload = partner_file.file.read(config.MAX_UPLOAD_BYTES + 1)
@@ -841,6 +832,9 @@ def upload_and_reconcile(
                 partner_filename=Path(partner_file.filename or "partner.csv").name,
                 expected_current_run_id=expected_run_id or None, enforce_expected=True,
             )
+        except reconcile_engine.DuplicateUpload as error:
+            raise HTTPException(status_code=409, detail={"code": "duplicate_files", "run_id": error.run_id,
+                                                        "message": str(error)}) from error
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         mirror_warning = None
@@ -865,7 +859,7 @@ def upload_and_reconcile(
 @app.post("/api/upload-preview")
 def preview_upload(
     core_file: UploadFile = File(...), partner_file: UploadFile = File(...),
-    _user=Depends(require_role("admin", "operator")),
+    _user=Depends(require_role("admin")),
 ):
     core_payload = core_file.file.read(config.MAX_UPLOAD_BYTES + 1)
     partner_payload = partner_file.file.read(config.MAX_UPLOAD_BYTES + 1)
@@ -882,9 +876,12 @@ def preview_upload(
         counts[row[5]] = counts.get(row[5], 0) + 1
     conn = get_db_connection()
     try:
-        current = conn.execute("SELECT run_id FROM reconciliation_results LIMIT 1").fetchone()
+        workflow = reconcile_engine.current_workflow(conn)
+        duplicate = conn.execute("SELECT run_id FROM reconciliation_runs WHERE source_hash = ?",
+                                 (reconcile_engine.fingerprint_rows(rows),)).fetchone()
     finally:
         conn.close()
     return {"transaction_count": len(rows), "matched_count": counts.get("MATCHED", 0),
             "discrepancy_count": len(rows) - counts.get("MATCHED", 0), "by_status": counts,
-            "current_run_id": current[0] if current else None}
+            "current_run_id": workflow["run_id"], "workflow": workflow,
+            "duplicate_run_id": duplicate[0] if duplicate else None}

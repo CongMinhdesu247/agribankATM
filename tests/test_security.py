@@ -278,6 +278,7 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(anomalies_body)["data"][0]["trans_id"], "0001")
         self.assertEqual((await self.request("/api/resolve", method="POST", headers=auth, data={
+            "run_id": json.loads(anomalies_body)["data"][0]["run_id"],
             "trans_id": "0001", "action_type": "REFUND", "napas_ref_code": "=1+1", "reason": "Review required",
         }))[0], 200)
         self.assertEqual((await self.request("/api/audit-logs/1/decision", method="POST", data={"decision": "APPROVE"},
@@ -305,6 +306,158 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(b"onclick=", body)
         self.assertNotIn(b"<script>", body)
         self.assertEqual(body.count(b'integrity="sha384-'), 4)
+
+    async def upload_pair(self, token, *, partner_amount=101, expected_run_id="", endpoint="/api/upload-and-reconcile"):
+        body = b""
+        for name, amount in (("core_file", 100), ("partner_file", partner_amount)):
+            body += (f'--workflow\r\nContent-Disposition: form-data; name="{name}"; filename="feed.csv"\r\n'
+                     f'Content-Type: text/csv\r\n\r\ntrans_id,amount,status\nT-1,{amount},SUCCESS\n\r\n').encode()
+        body += (f'--workflow\r\nContent-Disposition: form-data; name="expected_run_id"\r\n\r\n'
+                 f'{expected_run_id}\r\n--workflow--\r\n').encode()
+        return await self.request(endpoint, method="POST", body=body, headers={
+            "authorization": f"Bearer {token}", "content-type": "multipart/form-data; boundary=workflow",
+        })
+
+    async def workflow(self, token):
+        status, _, body = await self.request("/api/workflow", headers={"authorization": f"Bearer {token}"})
+        self.assertEqual(status, 200)
+        return json.loads(body)
+
+    async def close_workflow(self, token, run_id):
+        return await self.request("/api/close-run", method="POST", data={"run_id": run_id},
+                                  headers={"authorization": f"Bearer {token}"})
+
+    async def propose_review(self, token, run_id):
+        return await self.request("/api/resolve", method="POST", data={
+            "run_id": run_id, "trans_id": "T-1", "action_type": "REFUND",
+            "napas_ref_code": "ref", "reason": "Review required",
+        }, headers={"authorization": f"Bearer {token}"})
+
+    async def test_only_admin_can_preview_upload_or_close_runs(self):
+        for role in ("operator", "approver"):
+            self.add_user(role, role)
+            token = await self.token(role)
+            for endpoint in ("/api/upload-preview", "/api/upload-and-reconcile"):
+                self.assertEqual((await self.upload_pair(token, endpoint=endpoint))[0], 403)
+            self.assertEqual((await self.close_workflow(token, "missing"))[0], 403)
+        token = await self.token()
+        self.assertEqual((await self.upload_pair(token, endpoint="/api/upload-preview"))[0], 200)
+        self.assertEqual((await self.upload_pair(token))[0], 200)
+
+    async def test_unresolved_and_pending_reviews_block_close_and_replacement(self):
+        token = await self.token()
+        self.add_user("approver", "approver")
+        approver = await self.token("approver")
+        self.assertEqual((await self.upload_pair(token))[0], 200)
+        state = await self.workflow(token)
+        run_id = state["run_id"]
+        self.assertEqual((state["unprocessed_count"], state["pending_count"]), (1, 0))
+        self.assertEqual((await self.close_workflow(token, run_id))[0], 409)
+        self.assertEqual((await self.upload_pair(token, partner_amount=102, expected_run_id=run_id))[0], 409)
+        self.assertEqual((await self.propose_review(token, run_id))[0], 200)
+        state = await self.workflow(token)
+        self.assertEqual((state["unprocessed_count"], state["pending_count"]), (0, 1))
+        self.assertFalse(state["can_close"])
+        self.assertEqual((await self.close_workflow(token, run_id))[0], 409)
+        self.assertEqual((await self.upload_pair(token, partner_amount=102, expected_run_id=run_id))[0], 409)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM reconciliation_runs").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT review_status FROM audit_logs").fetchone()[0], "PENDING")
+        status, _, _ = await self.request("/api/audit-logs/1/decision", method="POST",
+                                         data={"decision": "REJECT", "comment": "Needs investigation"},
+                                         headers={"authorization": f"Bearer {approver}"})
+        self.assertEqual(status, 200)
+        state = await self.workflow(token)
+        self.assertEqual((state["unprocessed_count"], state["pending_count"]), (1, 0))
+        self.assertFalse(state["can_close"])
+
+    async def test_independent_approval_then_explicit_close_preserves_history_and_rejects_stale_work(self):
+        token = await self.token()
+        self.add_user("approver", "approver")
+        approver = await self.token("approver")
+        self.assertEqual((await self.upload_pair(token))[0], 200)
+        first = (await self.workflow(token))["run_id"]
+        self.assertEqual((await self.propose_review(token, first))[0], 200)
+        self.assertEqual((await self.request("/api/audit-logs/1/decision", method="POST", data={"decision": "APPROVE"},
+                                            headers={"authorization": f"Bearer {approver}"}))[0], 200)
+        state = await self.workflow(token)
+        self.assertTrue(state["can_close"])
+        self.assertFalse(state["can_upload"])
+        self.assertEqual((await self.upload_pair(token, partner_amount=102, expected_run_id=first))[0], 409)
+        self.assertEqual((await self.close_workflow(token, first))[0], 200)
+        self.assertEqual((await self.close_workflow(token, first))[0], 200)  # retry is harmless
+        self.assertEqual((await self.propose_review(token, first))[0], 409)
+        self.assertTrue((await self.workflow(token))["can_upload"])
+        self.assertEqual((await self.upload_pair(token, partner_amount=102, expected_run_id=first))[0], 200)
+        second = (await self.workflow(token))["run_id"]
+        self.assertNotEqual(first, second)
+        self.assertEqual((await self.propose_review(token, first))[0], 409)
+        self.assertEqual((await self.close_workflow(token, first))[0], 409)
+        status, _, body = await self.request(f"/api/runs/{first}", headers={"authorization": f"Bearer {token}"})
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertIsNotNone(result["run"]["closed_at"])
+        self.assertEqual(result["run"]["closed_by"], "admin")
+        self.assertEqual(result["data"][0]["processing_status"], "APPROVED")
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM audit_logs WHERE action_type = 'CLOSE_RUN'").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT resolved FROM reconciliation_results").fetchone()[0], 0)
+
+    async def test_even_matched_only_batch_requires_admin_to_close_before_next_upload(self):
+        token = await self.token()
+        self.assertEqual((await self.upload_pair(token, partner_amount=100))[0], 200)
+        first = (await self.workflow(token))["run_id"]
+        self.assertTrue((await self.workflow(token))["can_close"])
+        self.assertEqual((await self.upload_pair(token, expected_run_id=first))[0], 409)
+        self.assertEqual((await self.close_workflow(token, first))[0], 200)
+        # A preview from before another upload cannot overwrite the new run.
+        self.assertEqual((await self.upload_pair(token, expected_run_id=""))[0], 409)
+        self.assertEqual((await self.upload_pair(token, expected_run_id=first))[0], 200)
+
+    async def test_duplicate_upload_returns_existing_run_without_resetting_approval(self):
+        token = await self.token()
+        self.add_user("approver", "approver")
+        approver = await self.token("approver")
+        self.assertEqual((await self.upload_pair(token))[0], 200)
+        first = (await self.workflow(token))["run_id"]
+        self.assertEqual((await self.propose_review(token, first))[0], 200)
+        self.assertEqual((await self.request("/api/audit-logs/1/decision", method="POST", data={"decision": "APPROVE"},
+                                            headers={"authorization": f"Bearer {approver}"}))[0], 200)
+        status, _, body = await self.upload_pair(token, endpoint="/api/upload-preview")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["duplicate_run_id"], first)
+        status, _, body = await self.upload_pair(token, expected_run_id=first)
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["detail"]["run_id"], first)
+        self.assertEqual((await self.close_workflow(token, first))[0], 200)
+        self.assertEqual((await self.upload_pair(token, partner_amount=100, expected_run_id=first))[0], 200)
+        second = (await self.workflow(token))["run_id"]
+        status, _, body = await self.upload_pair(token, expected_run_id=second)
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["detail"]["code"], "duplicate_files")
+        self.assertEqual((await self.workflow(token))["run_id"], second)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM reconciliation_runs").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT resolved FROM reconciliation_run_results WHERE run_id = ?", (first,)).fetchone()[0], 1)
+
+    async def test_concurrent_uploads_cannot_replace_an_open_batch(self):
+        token = await self.token()
+        results = await asyncio.gather(self.upload_pair(token), self.upload_pair(token, partner_amount=102))
+        self.assertEqual(sorted(result[0] for result in results), [200, 409])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM reconciliation_runs").fetchone()[0], 1)
+
+    async def test_restore_endpoint_cannot_bypass_batch_control(self):
+        token = await self.token()
+        self.assertEqual((await self.request("/api/restore-baseline", method="POST",
+                                            headers={"authorization": f"Bearer {token}"}))[0], 410)
+
+    def test_fingerprints_ignore_row_order_but_distinguish_changed_values_and_sources(self):
+        rows = [("A", 100, 101, "SUCCESS", "SUCCESS", "AMOUNT_MISMATCH"),
+                ("B", 200, None, "SUCCESS", None, "MISSING_IN_PARTNER")]
+        self.assertEqual(reconcile_engine.fingerprint_rows(rows), reconcile_engine.fingerprint_rows(list(reversed(rows))))
+        changed = [("A", 101, 100, "SUCCESS", "SUCCESS", "AMOUNT_MISMATCH"), rows[1]]
+        self.assertNotEqual(reconcile_engine.fingerprint_rows(rows), reconcile_engine.fingerprint_rows(changed))
 
     def test_csv_preserves_ids_with_normalized_headers(self):
         frame = self.web.parse_uploaded_csv("test.csv", b" TRANS_ID , AMOUNT , STATUS ,extra\n0000123,100,SUCCESS,ignored\n", "Core")

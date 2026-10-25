@@ -1,5 +1,7 @@
 import sqlite3
 import uuid
+import hashlib
+import json
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
@@ -203,6 +205,7 @@ def initialize_database() -> None:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, snapshot_rows)
         conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, CURRENT_TIMESTAMP)")
+        initialize_run_workflow(conn)
         conn.commit()
 
 
@@ -366,6 +369,7 @@ def initialize_postgres_database() -> None:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, [tuple(row) for row in snapshot_rows])
             conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, CURRENT_TIMESTAMP::text)")
+            initialize_run_workflow(conn)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -388,6 +392,129 @@ def _ensure_audit_snapshot_columns(conn: sqlite3.Connection) -> None:
     for name, column_type in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE audit_logs ADD COLUMN {name} {column_type}")
+
+
+class DuplicateUpload(ValueError):
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        super().__init__("Cặp file này đã được đối soát. Vui lòng xem lại đợt đã có trong lịch sử.")
+
+
+def fingerprint_rows(rows) -> str:
+    """Hash business content, ignoring filenames, row order, and CSV formatting."""
+    digest = hashlib.sha256(b"agribank-reconciliation-v1\n")
+    for row in sorted(rows, key=lambda item: item[0]):
+        record = list(row[:6])
+        for index in (1, 2):
+            if record[index] is not None and record[index] == int(record[index]):
+                record[index] = int(record[index])
+        digest.update(json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def initialize_run_workflow(conn) -> None:
+    """Upgrade existing runs without changing transaction or approval states."""
+    _ensure_column(conn, "reconciliation_runs", "closed_at", "TEXT")
+    _ensure_column(conn, "reconciliation_runs", "closed_by", "TEXT")
+    _ensure_column(conn, "reconciliation_runs", "source_hash", "TEXT")
+    _ensure_column(conn, "reconciliation_run_results", "resolved", "INTEGER NOT NULL DEFAULT 0")
+    if conn.execute("SELECT 1 FROM schema_migrations WHERE version = 2").fetchone():
+        return
+    current = conn.execute("SELECT run_id FROM reconciliation_results LIMIT 1").fetchone()
+    active_id = current[0] if current else None
+    if current and (active_id is None or conn.execute(
+        "SELECT 1 FROM reconciliation_runs WHERE run_id = ?", (active_id,)
+    ).fetchone() is None):
+        active_id = uuid.uuid4().hex
+        counts = conn.execute("""SELECT COUNT(*),
+            SUM(CASE WHEN recon_status = 'MATCHED' THEN 1 ELSE 0 END) FROM reconciliation_results""").fetchone()
+        conn.execute("""INSERT INTO reconciliation_runs
+            (run_id, created_at, performed_by, core_filename, partner_filename,
+             transaction_count, matched_count, discrepancy_count)
+            VALUES (?, CURRENT_TIMESTAMP, 'migration', 'legacy-core.csv', 'legacy-partner.csv', ?, ?, ?)""",
+            (active_id, counts[0], counts[1] or 0, counts[0] - (counts[1] or 0)))
+        conn.execute("UPDATE reconciliation_results SET run_id = ?", (active_id,))
+        conn.execute("""UPDATE audit_logs SET run_id = ? WHERE run_id IS NULL
+            AND review_status = 'PENDING'
+            AND trans_id IN (SELECT trans_id FROM reconciliation_results)""", (active_id,))
+        conn.execute("""INSERT INTO reconciliation_run_results
+            (run_id, trans_id, core_amount, partner_amount, core_status, partner_status, recon_status)
+            SELECT run_id, trans_id, core_amount, partner_amount, core_status, partner_status, recon_status
+            FROM reconciliation_results""")
+    # Old runs keep their original audit history. Only the current one stays open.
+    conn.execute("""UPDATE reconciliation_run_results SET resolved = 1 WHERE EXISTS (
+        SELECT 1 FROM reconciliation_results r WHERE r.run_id = reconciliation_run_results.run_id
+        AND r.trans_id = reconciliation_run_results.trans_id AND r.resolved = 1) OR EXISTS (
+        SELECT 1 FROM audit_logs a WHERE a.run_id = reconciliation_run_results.run_id
+        AND a.trans_id = reconciliation_run_results.trans_id AND a.review_status = 'APPROVED'
+        AND a.action_type IN ('FORCE_SUCCESS', 'REFUND'))""")
+    if active_id is None:
+        conn.execute("UPDATE reconciliation_runs SET closed_at = created_at, closed_by = 'migration' WHERE closed_at IS NULL")
+    else:
+        conn.execute("""UPDATE reconciliation_runs SET closed_at = created_at, closed_by = 'migration'
+            WHERE run_id != ? AND closed_at IS NULL""", (active_id,))
+    seen = set()
+    runs = conn.execute("SELECT run_id FROM reconciliation_runs ORDER BY created_at DESC, run_id DESC").fetchall()
+    # Prefer the active run when old uploads contain identical data.
+    runs = sorted(runs, key=lambda run: run[0] != active_id)
+    for run in runs:
+        rows = conn.execute("""SELECT trans_id, core_amount, partner_amount, core_status, partner_status, recon_status
+            FROM reconciliation_run_results WHERE run_id = ?""", (run[0],)).fetchall()
+        if rows:
+            source_hash = fingerprint_rows(rows)
+            if source_hash not in seen:
+                conn.execute("UPDATE reconciliation_runs SET source_hash = ? WHERE run_id = ?", (source_hash, run[0]))
+                seen.add(source_hash)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_source_hash ON reconciliation_runs (source_hash)")
+    conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, CURRENT_TIMESTAMP)")
+
+
+def current_workflow(conn) -> dict:
+    current = conn.execute("SELECT run_id FROM reconciliation_results LIMIT 1").fetchone()
+    run = conn.execute("SELECT * FROM reconciliation_runs WHERE run_id = ?", (current[0],)).fetchone() if current else None
+    unresolved = conn.execute("""SELECT COUNT(*) FROM reconciliation_results
+        WHERE recon_status != 'MATCHED' AND resolved = 0""").fetchone()[0]
+    pending = conn.execute("SELECT COUNT(*) FROM audit_logs WHERE review_status = 'PENDING'").fetchone()[0]
+    closed = bool(run and run["closed_at"])
+    return {"run_id": run["run_id"] if run else None, "closed": closed,
+            "closed_at": run["closed_at"] if run else None, "closed_by": run["closed_by"] if run else None,
+            "unprocessed_count": max(0, unresolved - pending), "pending_count": pending,
+            "unresolved_count": unresolved,
+            "can_close": bool(run) and not closed and unresolved == 0 and pending == 0,
+            "can_upload": (not run or closed) and unresolved == 0 and pending == 0}
+
+
+def assert_run_open(conn, expected_run_id: str) -> None:
+    state = current_workflow(conn)
+    if not expected_run_id or state["run_id"] != expected_run_id:
+        raise ValueError("Đợt đối soát đã thay đổi. Vui lòng tải lại dữ liệu trước khi thao tác.")
+    if state["closed"]:
+        raise ValueError("Đợt đối soát đã đóng; không thể thay đổi kết quả xử lý.")
+
+
+def close_reconciliation_run(run_id: str, username: str) -> dict:
+    with closing(connect_database(DB_PATH)) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            state = current_workflow(conn)
+            if state["run_id"] != run_id:
+                raise ValueError("Đợt đối soát đã thay đổi. Vui lòng tải lại dữ liệu.")
+            if not state["closed"]:
+                if not state["can_close"]:
+                    raise ValueError(f"Chưa thể đóng đợt: còn {state['unprocessed_count']} giao dịch chưa xử lý "
+                                     f"và {state['pending_count']} yêu cầu chờ duyệt.")
+                conn.execute("UPDATE reconciliation_runs SET closed_at = CURRENT_TIMESTAMP, closed_by = ? WHERE run_id = ?",
+                             (username, run_id))
+                conn.execute("""INSERT INTO audit_logs
+                    (trans_id, action_type, napas_ref_code, reason, performed_by, run_id, review_status)
+                    VALUES ('*', 'CLOSE_RUN', '-', 'Đóng đợt đối soát đã hoàn tất', ?, ?, 'APPROVED')""", (username, run_id))
+            result = current_workflow(conn)
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def build_reconciliation_rows(core: pd.DataFrame, partner: pd.DataFrame) -> list[tuple]:
@@ -442,13 +569,23 @@ def replace_reconciliation_results(
     run_id = run_id or uuid.uuid4().hex
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     matched_count = sum(1 for row in results if row[5] == "MATCHED")
+    source_hash = fingerprint_rows(results)
     with closing(connect_database(DB_PATH)) as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
+            duplicate = conn.execute("SELECT run_id FROM reconciliation_runs WHERE source_hash = ?", (source_hash,)).fetchone()
+            if duplicate:
+                raise DuplicateUpload(duplicate[0])
             current = conn.execute("SELECT run_id FROM reconciliation_results LIMIT 1").fetchone()
             active_run_id = current[0] if current else None
             if enforce_expected and active_run_id != expected_current_run_id:
                 raise ValueError("The active reconciliation changed after preview; preview the files again")
+            workflow = current_workflow(conn)
+            if not workflow["can_upload"]:
+                raise ValueError(
+                    f"Chưa thể mở đợt mới: còn {workflow['unprocessed_count']} giao dịch chưa xử lý, "
+                    f"{workflow['pending_count']} yêu cầu chờ duyệt. Quản trị viên phải đóng đợt hiện tại trước."
+                )
             baseline = conn.execute("SELECT 1 FROM reconciliation_baseline_state WHERE baseline_id = 1").fetchone()
             if baseline is None:
                 current = conn.execute("""
@@ -469,15 +606,10 @@ def replace_reconciliation_results(
             conn.execute("""
                 INSERT INTO reconciliation_runs
                     (run_id, created_at, performed_by, core_filename, partner_filename,
-                     transaction_count, matched_count, discrepancy_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     transaction_count, matched_count, discrepancy_count, source_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (run_id, created_at, performed_by, core_filename, partner_filename,
-                  len(results), matched_count, len(results) - matched_count))
-            conn.execute("""
-                UPDATE audit_logs SET review_status = 'SUPERSEDED',
-                    approval_comment = 'Superseded by a newer reconciliation run'
-                WHERE review_status = 'PENDING'
-            """)
+                  len(results), matched_count, len(results) - matched_count, source_hash))
             conn.executemany("""
                 INSERT INTO reconciliation_run_results
                     (run_id, trans_id, core_amount, partner_amount, core_status, partner_status, recon_status)

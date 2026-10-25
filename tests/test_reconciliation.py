@@ -59,6 +59,38 @@ class ReconciliationRulesTests(unittest.TestCase):
 
 
 class ReconciliationStorageTests(unittest.TestCase):
+    def test_legacy_workflow_upgrade_preserves_resolutions_and_pending_reviews(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-workflow.db"
+            with patch.object(reconcile_engine, "DB_PATH", path):
+                reconcile_engine.initialize_database()
+                connection = sqlite3.connect(path)
+                try:
+                    connection.execute("DELETE FROM schema_migrations WHERE version = 2")
+                    connection.executemany("""INSERT INTO reconciliation_results
+                        (trans_id, recon_status, resolved) VALUES (?, 'AMOUNT_MISMATCH', ?)""",
+                        [("legacy-pending", 0), ("legacy-approved", 1)])
+                    connection.execute("""INSERT INTO audit_logs
+                        (trans_id, action_type, napas_ref_code, reason, performed_by, review_status)
+                        VALUES ('legacy-pending', 'REFUND', 'ref', 'reason', 'operator', 'PENDING')""")
+                    connection.commit()
+                finally:
+                    connection.close()
+                reconcile_engine.initialize_database()
+                reconcile_engine.initialize_database()
+                connection = sqlite3.connect(path)
+                try:
+                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM reconciliation_runs").fetchone()[0], 1)
+                    run_id = connection.execute("SELECT run_id FROM reconciliation_runs").fetchone()[0]
+                    self.assertEqual(connection.execute("SELECT run_id, review_status FROM audit_logs").fetchone(),
+                                     (run_id, "PENDING"))
+                    self.assertEqual(connection.execute("SELECT resolved FROM reconciliation_results WHERE trans_id = 'legacy-approved'").fetchone()[0], 1)
+                    self.assertEqual(connection.execute("SELECT resolved FROM reconciliation_run_results WHERE trans_id = 'legacy-approved'").fetchone()[0], 1)
+                    self.assertIsNone(connection.execute("SELECT closed_at FROM reconciliation_runs").fetchone()[0])
+                    self.assertIsNotNone(connection.execute("SELECT source_hash FROM reconciliation_runs").fetchone()[0])
+                finally:
+                    connection.close()
+
     def test_existing_database_schema_migrates_idempotently(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "legacy.db"
@@ -186,6 +218,7 @@ class ReconciliationStorageTests(unittest.TestCase):
                     self.assertEqual(conn.execute("SELECT COUNT(*) FROM reconciliation_run_results WHERE run_id = ?", (first_id,)).fetchone(), (1,))
                 finally:
                     conn.close()
+                reconcile_engine.close_reconciliation_run(first_id, "admin")
                 reconcile_engine.replace_reconciliation_results(
                     [("TX-2", 50, 60, "SUCCESS", "SUCCESS", "AMOUNT_MISMATCH")],
                     run_id="run-2", performed_by="operator",

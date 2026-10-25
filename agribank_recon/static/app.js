@@ -5,6 +5,7 @@ let allTransactions = [], currentTransactionPage = 1, totalTransactions = 0;
 let currentAuditPage = 1, totalAuditLogs = 0, currentRunsPage = 1, totalRuns = 0;
 let currentRunId = '', currentRunPage = 1, currentRunCount = 0;
 let currentUserRole = '';
+let activeWorkflow = null, workflowStale = false, resolveRunId = null;
 let transactionFilterTimer = null;
 const TRANSACTIONS_PER_PAGE = 100;
 
@@ -26,7 +27,7 @@ document.addEventListener('DOMContentLoaded', () => {
     resolveModal = new bootstrap.Modal(document.getElementById('resolveModal'));
     loginModal = new bootstrap.Modal(document.getElementById('loginModal'));
     
-    checkAuth();
+    checkAuth().catch(error => alert(error.message));
 });
 
 async function checkAuth() {
@@ -89,12 +90,68 @@ async function logout() {
 }
 
 function applyRoleVisibility() {
-    document.getElementById('users-nav-item').classList.toggle('d-none', currentUserRole !== 'admin');
-    document.getElementById('restore-initial-button').classList.toggle('d-none', currentUserRole !== 'admin');
-    document.querySelector('[data-bs-target="#uploadModal"]').classList.toggle('d-none', currentUserRole === 'approver');
+    const isAdmin = currentUserRole === 'admin';
+    document.getElementById('users-nav-item').classList.toggle('d-none', !isAdmin);
+    document.getElementById('upload-run-button').classList.toggle('d-none', !isAdmin);
+    document.getElementById('close-run-button').classList.toggle('d-none', !isAdmin);
 }
 
+function renderWorkflow() {
+    if (!activeWorkflow) return;
+    const state = activeWorkflow;
+    document.getElementById('workflow-title').textContent = state.run_id
+        ? `Đợt ${state.run_id} · ${state.closed ? 'Đã đóng' : 'Đang xử lý'}` : 'Chưa có đợt đối soát';
+    document.getElementById('workflow-counts').textContent = `${state.unprocessed_count} chưa xử lý · ${state.pending_count} chờ duyệt`;
+    document.getElementById('workflow-guidance').textContent = state.can_upload
+        ? 'Quản trị viên có thể tải cặp file mới.'
+        : state.can_close ? 'Đã hoàn tất xử lý. Quản trị viên cần đóng đợt trước khi tải cặp file mới.'
+        : 'Hoàn tất xử lý và phê duyệt trước khi đóng đợt.';
+    document.getElementById('upload-run-button').disabled = workflowStale || !state.can_upload;
+    document.getElementById('close-run-button').disabled = workflowStale || !state.can_close;
+    document.getElementById('workflow-stale').classList.toggle('d-none', !workflowStale);
+}
+
+async function refreshWorkflow(notify = false) {
+    const response = await apiFetch(`${API_URL}/workflow`);
+    if (!response.ok) throw new Error('Không tải được trạng thái đợt đối soát.');
+    const next = await response.json();
+    if (notify && activeWorkflow && (next.run_id !== activeWorkflow.run_id || next.closed !== activeWorkflow.closed)) {
+        workflowStale = true;
+        resolveModal?.hide();
+    } else if (!workflowStale || !notify) {
+        activeWorkflow = next;
+        if (!notify) workflowStale = false;
+    }
+    renderWorkflow();
+}
+
+async function closeCurrentRun() {
+    if (!activeWorkflow?.can_close || workflowStale) return;
+    const runId = activeWorkflow.run_id;
+    if (!confirm(`Đóng đợt ${runId}? Kết quả và lịch sử phê duyệt sẽ được giữ nguyên.`)) return;
+    const response = await apiFetch(`${API_URL}/close-run`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({run_id: runId})
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'Không thể đóng đợt.');
+    await loadData();
+    if (document.getElementById('runs-pane').classList.contains('active')) await loadRuns();
+}
+
+async function showExistingRun(runId) {
+    alert('Cặp file này đã được đối soát. Hệ thống mở lịch sử đợt cũ và giữ nguyên trạng thái xử lý.');
+    bootstrap.Modal.getInstance(document.getElementById('uploadModal'))?.hide();
+    bootstrap.Tab.getOrCreateInstance(document.getElementById('runs-tab')).show();
+    await loadRuns();
+    await loadRun(runId);
+}
+
+setInterval(() => {
+    if (currentUserRole && !document.hidden) refreshWorkflow(true).catch(() => {});
+}, 15000);
+
 async function loadData() {
+    await refreshWorkflow();
     const resStats = await apiFetch(`${API_URL}/stats`);
     if (!resStats.ok) throw new Error('Không tải được thống kê giao dịch.');
     const dataStats = await resStats.json();
@@ -217,12 +274,12 @@ function renderTransactionsPage() {
         tr.appendChild(statusCell);
 
         const actionCell = addCell('', 'text-center');
-        if (['admin', 'operator'].includes(currentUserRole)) {
+        if (['admin', 'operator'].includes(currentUserRole) && !activeWorkflow?.closed && !workflowStale) {
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'btn btn-sm btn-danger';
             button.innerHTML = '<i class="bi bi-tools me-1"></i> Xử lý';
-            button.addEventListener('click', () => openResolveModal(item.trans_id));
+            button.addEventListener('click', () => openResolveModal(item.trans_id, item.run_id));
             actionCell.appendChild(button);
         }
         tbody.appendChild(tr);
@@ -233,25 +290,6 @@ function renderTransactionsPage() {
     document.getElementById('transactions-page').textContent = `Trang ${currentTransactionPage} / ${pageCount}`;
     document.getElementById('transactions-prev').disabled = currentTransactionPage <= 1;
     document.getElementById('transactions-next').disabled = currentTransactionPage >= pageCount;
-}
-
-async function restoreInitialData() {
-    if (!confirm('Khôi phục bộ dữ liệu ban đầu? Dữ liệu đối soát hiện tại sẽ bị thay thế.')) return;
-    const button = document.getElementById('restore-initial-button');
-    if (button) button.disabled = true;
-    try {
-        const response = await apiFetch(`${API_URL}/restore-baseline`, { method: 'POST' });
-        const result = await response.json();
-        if (!response.ok || result.status !== 'success') {
-            throw new Error(result.detail || result.message || 'Không khôi phục được danh sách ban đầu.');
-        }
-        clearTransactionFilters();
-        await loadData();
-    } catch (error) {
-        alert(`Lỗi khôi phục dữ liệu: ${error.message}`);
-    } finally {
-        if (button) button.disabled = false;
-    }
 }
 
 function renderCharts(matched, amtMismatch, sttMismatch, missCore, missPartner) {
@@ -397,12 +435,12 @@ async function loadRuns() {
     totalRuns = result.count || 0;
     const body = document.getElementById('runs-table-body');
     body.replaceChildren();
-    if (!(result.data || []).length) appendEmptyRow(body, 8, 'Chưa có lần đối soát nào được ghi nhận.');
+    if (!(result.data || []).length) appendEmptyRow(body, 9, 'Chưa có lần đối soát nào được ghi nhận.');
     (result.data || []).forEach(run => {
         const row = document.createElement('tr');
         [run.created_at, run.performed_by, run.core_filename, run.partner_filename,
             Number(run.transaction_count).toLocaleString(), Number(run.matched_count).toLocaleString(),
-            Number(run.discrepancy_count).toLocaleString()].forEach(value => {
+            Number(run.discrepancy_count).toLocaleString(), run.closed_by === 'migration' ? 'Lưu trữ trước nâng cấp' : run.closed_at ? 'Đã đóng' : 'Đang xử lý'].forEach(value => {
             const cell = document.createElement('td'); cell.textContent = value ?? ''; row.appendChild(cell);
         });
         const cell = document.createElement('td');
@@ -432,14 +470,14 @@ async function loadRun(runId, page = 1) {
     detail.appendChild(title);
     const table = document.createElement('table'); table.className = 'table table-sm table-striped';
     const head = document.createElement('thead'), headRow = document.createElement('tr');
-    ['Mã giao dịch', 'Core', 'Napas', 'Trạng thái Core', 'Trạng thái Napas', 'Kết quả'].forEach(label => {
+    ['Mã giao dịch', 'Core', 'Napas', 'Trạng thái Core', 'Trạng thái Napas', 'Kết quả', 'Xử lý'].forEach(label => {
         const cell = document.createElement('th'); cell.textContent = label; headRow.appendChild(cell);
     });
     head.appendChild(headRow); table.appendChild(head);
     const body = document.createElement('tbody');
     (result.data || []).forEach(item => {
         const row = document.createElement('tr');
-        [item.trans_id, item.core_amount, item.partner_amount, item.core_status, item.partner_status, item.recon_status].forEach(value => {
+        [item.trans_id, item.core_amount, item.partner_amount, item.core_status, item.partner_status, item.recon_status, ({MATCHED: 'Đã khớp', APPROVED: 'Đã duyệt', PENDING: 'Chờ duyệt', UNPROCESSED: 'Chưa xử lý'})[item.processing_status] || item.processing_status].forEach(value => {
             const cell = document.createElement('td'); cell.textContent = value == null ? '—' : String(value); row.appendChild(cell);
         }); body.appendChild(row);
     });
@@ -523,7 +561,9 @@ async function downloadAuditReport() {
     }
 }
 
-function openResolveModal(transId) {
+function openResolveModal(transId, runId) {
+    if (workflowStale || activeWorkflow?.closed) { alert('Đợt đã thay đổi hoặc đã đóng. Vui lòng tải lại dữ liệu.'); return; }
+    resolveRunId = runId;
     document.getElementById('modal-trans-id').value = transId;
     document.getElementById('display-trans-id').value = transId;
     document.getElementById('modal-napas-ref').value = '';
@@ -555,6 +595,11 @@ async function submitUploadLogs() {
         const previewResponse = await apiFetch('/api/upload-preview', { method: 'POST', body: formData });
         const preview = await previewResponse.json();
         if (!previewResponse.ok) throw new Error(preview.detail || 'Không kiểm tra được file.');
+        if (preview.duplicate_run_id) { await showExistingRun(preview.duplicate_run_id); return; }
+        if (!preview.workflow.can_upload) {
+            await refreshWorkflow();
+            throw new Error('Cần hoàn tất xử lý, phê duyệt và đóng đợt hiện tại trước khi tải cặp file mới.');
+        }
         formData.append('expected_run_id', preview.current_run_id || '');
         const breakdown = Object.entries(preview.by_status || {})
             .map(([status, count]) => `${status}: ${Number(count).toLocaleString()}`).join('\n');
@@ -565,7 +610,7 @@ async function submitUploadLogs() {
             `Khớp: ${Number(preview.matched_count).toLocaleString()}\n` +
             `Cần tra soát: ${Number(preview.discrepancy_count).toLocaleString()}\n` +
             `${breakdown ? `\nPhân loại:\n${breakdown}\n` : ''}\n` +
-            `Nếu tiếp tục, dữ liệu hiện tại sẽ được thay bằng kết quả mới.`
+            `Nếu tiếp tục, hệ thống mở đợt mới. Đợt đã đóng vẫn được giữ trong lịch sử.`
         );
         if (!confirmed) return;
         const response = await apiFetch('/api/upload-and-reconcile', {
@@ -585,6 +630,7 @@ async function submitUploadLogs() {
             clearTransactionFilters();
             await loadData();
         } else {
+            if (result.detail?.code === 'duplicate_files') { await showExistingRun(result.detail.run_id); return; }
             throw new Error(result.detail || result.message || response.statusText);
         }
     } catch (error) {
@@ -610,6 +656,7 @@ async function submitResolve() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             trans_id,
+            run_id: resolveRunId,
             action_type,
             napas_ref_code,
             reason
@@ -632,7 +679,8 @@ const pageActions = {
     loadAuditLogs: event => loadAuditLogs(),
     loadRuns: event => loadRuns(),
     loadUsers: event => loadUsers(),
-    restoreInitialData: event => restoreInitialData(),
+    closeCurrentRun: event => closeCurrentRun(),
+    reloadWorkflow: event => loadData(),
     applyTransactionFilters: event => applyTransactionFilters(),
     clearTransactionFilters: event => clearTransactionFilters(),
     previousTransactionPage: event => changeTransactionPage(-1),

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agribank_recon import config
 from agribank_recon.database import connect_database, get_table_columns
-from agribank_recon.reconcile_engine import initialize_database
+from agribank_recon.reconcile_engine import initialize_database, initialize_run_workflow
 
 TABLES_IN_COPY_ORDER = (
     "reconciliation_runs",
@@ -130,6 +130,11 @@ def migrate(source_path: Path) -> dict[str, int]:
                 if actual != expected:
                     raise RuntimeError(f"Row-count verification failed for {table}: expected {expected}, got {actual}")
 
+            if "source_hash" not in source["reconciliation_runs"][0]:
+                # The empty target already ran migrations at startup. Upgrade
+                # legacy source rows only after verifying the exact copied counts.
+                connection.execute("DELETE FROM schema_migrations WHERE version = 2")
+                initialize_run_workflow(connection)
             connection.commit()
         except Exception:
             connection.rollback()

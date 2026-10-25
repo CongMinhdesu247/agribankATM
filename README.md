@@ -24,7 +24,7 @@ Run the automated unit tests with `python -m unittest discover -s tests -v`.
 
 The security review and verification results are recorded in [docs/security-review.md](docs/security-review.md).
 
-The local demo dataset can be regenerated with `python -m scripts.generate_data`, followed by `python -m agribank_recon.reconcile_engine`. This records a new reconciliation run and replaces the active dataset; back up the database first if its current state matters.
+The local demo dataset can be regenerated with `python -m scripts.generate_data`, followed by `python -m agribank_recon.reconcile_engine`. Creating a new run requires completing and closing any current run first; this rule also applies to the CLI. Back up the database first if its current state matters.
 
 ## CSV upload contract
 
@@ -36,7 +36,20 @@ trans_id,amount,status
 
 Additional columns are allowed, up to 100 columns in total. Every nonblank row must contain exactly as many fields as the header; duplicate normalized headers, malformed quoting, and NUL characters are rejected. IDs are read as text even when headers contain spaces or uppercase letters, preserving leading zeros. IDs must be unique within each file and no longer than 100 characters; statuses must be nonblank and no longer than 100 characters. Amounts must be whole, non-negative VND values no greater than 9,007,199,254,740,991. The amount limit keeps integer values exact through the database/API numeric representation. Fractional amounts are rejected. Invalid files are rejected before the reconciliation table is changed. Statuses are trimmed and uppercased; matching is based on exact normalized status equality, so configure upstream status mapping before using feeds with different status vocabularies.
 
-The upload dialog validates both files and shows a reconciliation summary before replacing the active dataset. Each successful run stores its source filenames, operator, totals, and a transaction snapshot. The **Reconciliation History** tab can view prior run summaries and transaction details. The initial dataset (including an empty initial dataset) is captured once as the restore baseline.
+Only administrators can preview or upload source files. The upload dialog validates both files and shows a reconciliation summary. Every run stores its filenames, uploader, totals, transaction snapshot, and closure metadata. The **Reconciliation History** tab shows prior runs and each transaction's processing status, including approved reviews.
+
+## Controlled reconciliation workflow
+
+1. An administrator uploads the first CSV pair to open a run.
+2. Administrators/operators propose review actions; a different administrator/approver approves or rejects them. Rejections return the transaction to the work queue.
+3. The run banner shows **unprocessed transactions** and **pending approvals** separately. Both must reach zero before the administrator can select **Close completed run**. Even a fully matched file pair requires explicit closure.
+4. After closure, the administrator can upload the next pair. The closed run and its approved transaction states remain in history. Uploading no longer supersedes pending approvals.
+
+The API checks these rules inside the same serialized transaction as the data change, including simultaneous uploads from two administrators. The upload/preview buttons are hidden from operators and approvers. Run changes and closure are polled every 15 seconds while the page is visible; stale pages show a reload warning. Review submissions must include the run ID shown when opening the review, and the API rejects submissions or decisions for a changed/closed run.
+
+Uploading the same normalized business content opens the existing run in history instead of resetting its workflow. Filenames, CSV row order, and equivalent numeric formatting do not make a new run; changes to required transaction values do. History is read-only and is not reactivated by uploading old files. The reset-to-baseline UI was removed, and its legacy endpoint returns 410, so it cannot bypass closure controls.
+
+On deployment, migration version 2 adds closure/content-hash metadata and persistent snapshot resolution states. It preserves the current run, current resolutions, and pending reviews. Older inactive runs are labeled as archived before the upgrade; that label does not certify they completed the new closure process. Legacy rows without a run are assigned a run and preserved. The original baseline tables remain for data compatibility, without an online reset action. Deferred reviews and carrying unresolved work into another run are not implemented: finish the current run before activating the next one.
 
 Review actions are submitted by an administrator or operator and remain pending until a different administrator or approver approves or rejects them. Only approved reviews are marked resolved. The admin account created by `scripts.setup_admin` can create administrator, operator, and approver accounts in **Account Management** and disable accounts; disabled users lose access immediately. Account records and roles are stored in the configured database.
 
