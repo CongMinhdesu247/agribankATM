@@ -1,5 +1,5 @@
-import config
-from reconcile_engine import initialize_database
+from agribank_recon import config
+from agribank_recon.reconcile_engine import initialize_database
 
 
 def main() -> None:

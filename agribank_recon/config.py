@@ -1,7 +1,8 @@
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+APP_DIR = Path(__file__).resolve().parent
+BASE_DIR = APP_DIR.parent
 
 
 def load_env_file(path: Path = BASE_DIR / ".env") -> None:
@@ -48,6 +49,13 @@ APP_USERNAME = os.getenv("APP_USERNAME", "")
 APP_PASSWORD_HASH = os.getenv("APP_PASSWORD_HASH", "")
 ACCESS_TOKEN_TTL_MINUTES = int(os.getenv("ACCESS_TOKEN_TTL_MINUTES", "60"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
+ALLOWED_HOSTS = tuple(
+    host.strip().lower()
+    for host in os.getenv("APP_ALLOWED_HOSTS", "localhost,127.0.0.1,::1").split(",")
+    if host.strip()
+)
+if not ALLOWED_HOSTS:
+    raise RuntimeError("APP_ALLOWED_HOSTS must contain at least one hostname.")
 _upload_dir = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "uploads")))
 UPLOAD_DIR = _upload_dir.resolve() if _upload_dir.is_absolute() else (BASE_DIR / _upload_dir).resolve()
 MAX_UPLOAD_BYTES = min(int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))), 10 * 1024 * 1024)

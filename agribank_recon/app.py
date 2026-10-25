@@ -16,18 +16,18 @@ import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-import config
-import reconcile_engine
-from database import connect_database, get_table_columns, is_integrity_error
-from request_limits import RequestBodyLimitMiddleware
-from security import create_access_token, hash_password, verify_access_token, verify_password
+from . import config, reconcile_engine
+from .database import connect_database, get_table_columns, is_integrity_error
+from .request_limits import RequestBodyLimitMiddleware
+from .security import create_access_token, hash_password, verify_access_token, verify_password
 
 logger = logging.getLogger(__name__)
 
 if len(config.JWT_SECRET) < 32 or not config.APP_USERNAME or not config.APP_PASSWORD_HASH:
-    raise RuntimeError("Authentication is not configured. Run setup_admin.py to create the .env file.")
+    raise RuntimeError("Authentication is not configured. Run python -m scripts.setup_admin to create the .env file.")
 
 app = FastAPI(title="Agribank Reconciliation Review", docs_url=None, redoc_url=None, openapi_url=None)
 BASE_DIR = config.BASE_DIR
@@ -77,6 +77,7 @@ app.add_middleware(
     RequestBodyLimitMiddleware,
     max_upload_body_bytes=(2 * config.MAX_UPLOAD_BYTES) + 1024 * 1024,
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.ALLOWED_HOSTS))
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=50)
@@ -260,13 +261,13 @@ def logout(request: Request, response: Response, _user=Depends(current_user)):
     return {"status": "ok"}
 
 # Serve static assets from the project directory.
-app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+app.mount("/static", StaticFiles(directory=config.APP_DIR / "static"), name="static")
 
 # 3. Trả về giao diện web trực tiếp từ Server
 @app.get("/")
 def read_root():
     return FileResponse(
-        BASE_DIR / "index.html",
+        config.APP_DIR / "templates" / "index.html",
         headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 

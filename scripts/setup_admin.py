@@ -4,9 +4,9 @@ import secrets
 import re
 from pathlib import Path
 
-from security import hash_password
+from agribank_recon.security import hash_password
 
-ENV_PATH = Path(__file__).resolve().parent / ".env"
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 def read_existing_env() -> dict[str, str]:

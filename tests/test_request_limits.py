@@ -1,6 +1,6 @@
 import unittest
 
-from request_limits import RequestBodyLimitMiddleware
+from agribank_recon.request_limits import RequestBodyLimitMiddleware
 
 
 class RequestBodyLimitTests(unittest.IsolatedAsyncioTestCase):

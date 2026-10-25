@@ -19,5 +19,5 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/agribank-entrypoint
 USER root
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/agribank-entrypoint"]
-CMD ["sh", "-c", "python init_db.py && exec uvicorn app:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1"]
+CMD ["sh", "-c", "python -m scripts.init_db && exec uvicorn agribank_recon.app:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1"]
 

@@ -8,7 +8,7 @@ import time
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-import config
+from . import config
 
 bearer_scheme = HTTPBearer(auto_error=False)
 SCRYPT_N = 1 << 14
@@ -59,7 +59,7 @@ def verify_password(password: str, encoded_hash: str) -> bool:
 
 def create_access_token(username: str) -> tuple[str, int]:
     if len(config.JWT_SECRET) < 32:
-        raise RuntimeError("JWT_SECRET must contain at least 32 characters; run setup_admin.py first.")
+        raise RuntimeError("JWT_SECRET must contain at least 32 characters; run python -m scripts.setup_admin first.")
     ttl_seconds = config.ACCESS_TOKEN_TTL_MINUTES * 60
     now = int(time.time())
     header = {"alg": "HS256", "typ": "JWT"}

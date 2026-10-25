@@ -7,7 +7,7 @@ import shutil
 import time
 from pathlib import Path
 
-from config import UPLOAD_DIR
+from agribank_recon.config import UPLOAD_DIR
 
 UPLOAD_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 

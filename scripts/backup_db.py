@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 
-from config import DB_PATH, BASE_DIR, DATABASE_KIND
+from agribank_recon.config import DB_PATH, BASE_DIR, DATABASE_KIND
 
 
 def main() -> None:

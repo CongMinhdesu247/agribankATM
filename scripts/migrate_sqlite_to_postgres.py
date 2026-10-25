@@ -5,9 +5,9 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-import config
-from database import connect_database, get_table_columns
-from reconcile_engine import initialize_database
+from agribank_recon import config
+from agribank_recon.database import connect_database, get_table_columns
+from agribank_recon.reconcile_engine import initialize_database
 
 TABLES_IN_COPY_ORDER = (
     "reconciliation_runs",

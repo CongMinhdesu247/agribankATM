@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 
-import config
-from config import BASE_DIR, DB_PATH
-from database import connect_database, get_table_columns
+from . import config
+from .config import BASE_DIR, DB_PATH
+from .database import connect_database, get_table_columns
 
 CORE_LOG_PATH = BASE_DIR / "core_log.csv"
 PARTNER_LOG_PATH = BASE_DIR / "partner_log.csv"

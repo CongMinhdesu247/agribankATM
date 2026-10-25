@@ -7,7 +7,7 @@ import sqlite3
 from threading import Lock
 from typing import Any
 
-import config
+from . import config
 
 _PG_LOCK_KEY = 731_882_916_204
 _PG_POOL = None

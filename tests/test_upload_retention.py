@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cleanup_uploads import find_expired_uploads
+from scripts.cleanup_uploads import find_expired_uploads
 
 
 class UploadRetentionTests(unittest.TestCase):

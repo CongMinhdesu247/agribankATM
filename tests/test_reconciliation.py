@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
-import reconcile_engine
-from security import hash_password, verify_password
+from agribank_recon import reconcile_engine
+from agribank_recon.security import hash_password, verify_password
 
 
 class AmountValidationTests(unittest.TestCase):

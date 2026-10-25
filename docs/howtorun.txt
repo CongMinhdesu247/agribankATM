@@ -1,0 +1,5 @@
+For local setup, production/container operation, database initialization, and backups, see ../README.md.
+Run the commands from the project root. For first setup, install requirements, copy .env.example to .env, then run:
+
+    python -m scripts.setup_admin
+    python -m scripts.init_db

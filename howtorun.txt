@@ -1,2 +1,0 @@
-For local setup, production/container operation, database initialization, and backups, see README.md.
-First run: install requirements, copy .env.example to .env, run python setup_admin.py, then run init_db.py.
