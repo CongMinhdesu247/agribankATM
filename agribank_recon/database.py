@@ -40,7 +40,12 @@ class HybridRow:
 
 
 def _hybrid_row_factory(cursor):
-    names = tuple(column.name for column in cursor.description)
+    description = cursor.description
+    # Psycopg also calls the factory when constructing a cursor, before a
+    # query has run, and after statements that don't return rows (e.g. DDL).
+    if description is None:
+        return tuple
+    names = tuple(column.name for column in description)
     return lambda values: HybridRow(values, names)
 
 
@@ -63,7 +68,11 @@ def _postgres_connection_pool():
                     kwargs={"row_factory": _hybrid_row_factory},
                     open=False,
                 )
-                pool.open(wait=True, timeout=10)
+                try:
+                    pool.open(wait=True, timeout=10)
+                except Exception:
+                    pool.close()
+                    raise
                 _PG_POOL = pool
     return _PG_POOL
 
@@ -119,6 +128,10 @@ class _PostgresCursor:
 
     def fetchall(self):
         return self._cursor.fetchall()
+
+    def __iter__(self):
+        # CSV report export consumes the cursor as a stream, like sqlite3.
+        return iter(self._cursor)
 
     def close(self):
         self._cursor.close()
