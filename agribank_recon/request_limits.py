@@ -1,4 +1,4 @@
-"""ASGI request body limit for CSV upload endpoints."""
+"""Bound request bodies before JSON and multipart parsing."""
 
 import json
 import logging
@@ -15,16 +15,19 @@ class _RequestTooLarge(Exception):
 
 
 class RequestBodyLimitMiddleware:
-    def __init__(self, app: ASGIApp, *, max_upload_body_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, *, max_upload_body_bytes: int, max_body_bytes: int = 64 * 1024) -> None:
         self.app = app
         self.max_upload_body_bytes = max_upload_body_bytes
+        self.max_body_bytes = max_body_bytes
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http" or scope.get("path") not in {
-            "/api/upload-preview", "/api/upload-and-reconcile",
-        } or scope.get("method") != "POST":
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        path = scope.get("path", "").rstrip("/")
+        limit = self.max_upload_body_bytes if path in {
+            "/api/upload-preview", "/api/upload-and-reconcile",
+        } and scope.get("method") == "POST" else self.max_body_bytes
         request_id = uuid.uuid4().hex
 
         headers = dict(scope.get("headers", []))
@@ -40,25 +43,35 @@ class RequestBodyLimitMiddleware:
                 logger.warning("upload_rejected request_id=%s reason=invalid_content_length", request_id)
                 await self._send_error(send, 400, "Invalid Content-Length", request_id)
                 return
-            if declared_size > self.max_upload_body_bytes:
+            if declared_size > limit:
                 logger.warning("upload_rejected request_id=%s reason=body_limit", request_id)
                 await self._send_error(send, 413, "Upload request is too large", request_id)
                 return
 
         received_bytes = 0
         response_started = False
+        exceeded_limit = False
 
         async def limited_receive():
-            nonlocal received_bytes
+            nonlocal received_bytes, exceeded_limit
             message = await receive()
             if message["type"] == "http.request":
                 received_bytes += len(message.get("body", b""))
-                if received_bytes > self.max_upload_body_bytes:
+                if received_bytes > limit:
+                    exceeded_limit = True
                     raise _RequestTooLarge
             return message
 
         async def tracked_send(message):
             nonlocal response_started
+            # Body parsers/middleware can catch the receive exception and turn it
+            # into a generic 400. Replace that response with the correct 413.
+            if exceeded_limit:
+                if not response_started:
+                    response_started = True
+                    logger.warning("request_rejected request_id=%s reason=body_limit", request_id)
+                    await self._send_error(send, 413, "Request body is too large", request_id)
+                return
             if message["type"] == "http.response.start":
                 response_started = True
             await send(message)

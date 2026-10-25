@@ -22,6 +22,8 @@ The server exposes `/health/live` and `/health/ready` for process and database h
 
 Run the automated unit tests with `python -m unittest discover -s tests -v`.
 
+The security review and verification results are recorded in [docs/security-review.md](docs/security-review.md).
+
 The local demo dataset can be regenerated with `python -m scripts.generate_data`, followed by `python -m agribank_recon.reconcile_engine`. This records a new reconciliation run and replaces the active dataset; back up the database first if its current state matters.
 
 ## CSV upload contract
@@ -32,7 +34,7 @@ Both files must be UTF-8 CSV files of 10 MB or less, with at most 250,000 data r
 trans_id,amount,status
 ```
 
-Additional columns are allowed. IDs must be unique within each file and no longer than 100 characters; statuses must be nonblank and no longer than 100 characters. Amounts must be whole, non-negative VND values no greater than 9,007,199,254,740,991. The amount limit keeps integer values exact through the database/API numeric representation. Fractional amounts are rejected. Invalid files are rejected before the reconciliation table is changed. Statuses are trimmed and uppercased; matching is based on exact normalized status equality, so configure upstream status mapping before using feeds with different status vocabularies.
+Additional columns are allowed, up to 100 columns in total. Every nonblank row must contain exactly as many fields as the header; duplicate normalized headers, malformed quoting, and NUL characters are rejected. IDs are read as text even when headers contain spaces or uppercase letters, preserving leading zeros. IDs must be unique within each file and no longer than 100 characters; statuses must be nonblank and no longer than 100 characters. Amounts must be whole, non-negative VND values no greater than 9,007,199,254,740,991. The amount limit keeps integer values exact through the database/API numeric representation. Fractional amounts are rejected. Invalid files are rejected before the reconciliation table is changed. Statuses are trimmed and uppercased; matching is based on exact normalized status equality, so configure upstream status mapping before using feeds with different status vocabularies.
 
 The upload dialog validates both files and shows a reconciliation summary before replacing the active dataset. Each successful run stores its source filenames, operator, totals, and a transaction snapshot. The **Reconciliation History** tab can view prior run summaries and transaction details. The initial dataset (including an empty initial dataset) is captured once as the restore baseline.
 
@@ -115,10 +117,10 @@ The container does not include the local development database or CSV files. Comp
 
 ## Security and current deployment limits
 
-- Login throttling is stored in the configured database and shared across workers: 20 failed attempts per IP in five minutes and 10 attempts per account in 15 minutes. Monitor repeated failures.
-- Browser sessions use an `HttpOnly`, `SameSite=Strict` JWT cookie; `COOKIE_SECURE=true` forces the `Secure` flag behind Railway's HTTPS proxy. Unsafe cookie-authenticated API requests require a same-origin `Origin` header. Bearer tokens remain supported for API clients. Password hashes use scrypt; tokens expire and disabling an account invalidates its tokens immediately. Individual token revocation is not supported.
-- The application rejects upload requests larger than two configured file limits plus multipart overhead, including chunked request bodies. Keep an equivalent body-size and connection-timeout limit at any public reverse proxy.
+- Login throttling is stored in the configured database and shared across workers: 20 attempts per IP in five minutes and 10 attempts per account in 15 minutes, including successful attempts. Quotas are reserved before password hashing and successful logins do not reset them. Password verification runs outside the shared writer lock. Monitor repeated failures.
+- Browser sessions use an `HttpOnly`, `SameSite=Strict` JWT cookie; `COOKIE_SECURE=true` forces the `Secure` flag behind Railway's HTTPS proxy. Unsafe cookie-authenticated API requests require a same-origin `Origin` header. Login rejects foreign origins and cross-site Fetch Metadata. Bearer tokens remain supported for API clients using an active session token. Password hashes use scrypt. Each login creates a distinct token whose SHA-256 hash and expiry are stored in `app_sessions`; logout deletes that session, and disabling an account deletes all of its sessions. Re-enabling the account requires a fresh login. Tokens issued before this update, or created outside the login flow, are rejected. Sessions are deliberately not copied by the SQLite-to-PostgreSQL migration utility.
+- The application rejects upload requests larger than two configured file limits plus multipart overhead, including chunked request bodies. Other request bodies are limited to 64 KiB. Keep equivalent body-size, connection-rate, and timeout limits at any public reverse proxy.
 - The schema has a migration-version ledger. Use PostgreSQL for deployment; keep one web replica while uploaded files use the attached Railway volume. The app uses a bounded PostgreSQL connection pool.
 - Configure HTTPS, firewall rules, secret rotation, database backup retention, and monitoring on the deployment host. Keep `.env`, SQLite files, upload archives, and backups private.
-- Bootstrap, Bootstrap Icons, and Chart.js are loaded from public CDNs by the HTML page at pinned versions. For offline or strict environments, vendor these assets locally and review their update process.
+- Bootstrap, Bootstrap Icons, and Chart.js are loaded from a public CDN at pinned versions with SHA-384 Subresource Integrity checks. JavaScript lives in `/static/app.js`; Content Security Policy blocks inline scripts and handlers, framing, objects, and foreign API connections. HSTS is sent for HTTPS or secure-cookie deployments. When upgrading a CDN asset, recompute its integrity value. For offline environments, vendor these assets locally.
 

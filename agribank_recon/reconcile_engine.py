@@ -134,6 +134,13 @@ def initialize_database() -> None:
                 username_hash TEXT,
                 attempted_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS app_sessions (
+                token_hash TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_app_sessions_username ON app_sessions (username);
+            CREATE INDEX IF NOT EXISTS idx_app_sessions_expiry ON app_sessions (expires_at);
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL
@@ -292,6 +299,13 @@ def initialize_postgres_database() -> None:
             username_hash TEXT,
             attempted_at DOUBLE PRECISION NOT NULL
         )""",
+        """CREATE TABLE IF NOT EXISTS app_sessions (
+            token_hash TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            expires_at DOUBLE PRECISION NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_app_sessions_username ON app_sessions (username)",
+        "CREATE INDEX IF NOT EXISTS idx_app_sessions_expiry ON app_sessions (expires_at)",
         """CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
             applied_at TEXT NOT NULL

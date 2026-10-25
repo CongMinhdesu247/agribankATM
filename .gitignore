@@ -12,6 +12,17 @@ data/
 *.db-wal
 *.sqlite
 *.sqlite3
+*.db-journal
+*.sqlite-journal
+*.sqlite3-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+.aws/
+.ssh/
+*.pem
+*.key
 core_log.csv
 partner_log.csv
 core_log_uploaded_last.csv

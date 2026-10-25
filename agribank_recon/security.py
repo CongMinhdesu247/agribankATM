@@ -5,12 +5,8 @@ import json
 import secrets
 import time
 
-from fastapi import Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
 from . import config
 
-bearer_scheme = HTTPBearer(auto_error=False)
 SCRYPT_N = 1 << 14
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -65,6 +61,7 @@ def create_access_token(username: str) -> tuple[str, int]:
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "sub": username,
+        "jti": secrets.token_urlsafe(32),
         "iat": now,
         "exp": now + ttl_seconds,
         "iss": "agribank-reconciliation",
@@ -91,9 +88,10 @@ def verify_access_token(token: str) -> str | None:
         now = int(time.time())
         issued_at = payload.get("iat")
         expires_at = payload.get("exp")
-        if not isinstance(issued_at, int) or issued_at > now + 60:
+        if type(issued_at) is not int or issued_at > now + 60:
             return None
-        if not isinstance(expires_at, int) or expires_at <= now or expires_at - issued_at > config.ACCESS_TOKEN_TTL_MINUTES * 60 + 60:
+        if (type(expires_at) is not int or expires_at <= now or expires_at <= issued_at
+                or expires_at - issued_at > config.ACCESS_TOKEN_TTL_MINUTES * 60 + 60):
             return None
         if payload.get("iss") != "agribank-reconciliation" or payload.get("aud") != "agribank-reconciliation-api":
             return None
@@ -101,15 +99,3 @@ def verify_access_token(token: str) -> str | None:
         return subject if isinstance(subject, str) and subject else None
     except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
         return None
-
-
-def require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> str:
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Bearer token required", headers={"WWW-Authenticate": "Bearer"})
-    username = verify_access_token(credentials.credentials)
-    if username is None or not hmac.compare_digest(
-        username.encode("utf-8"), config.APP_USERNAME.encode("utf-8")
-    ):
-        raise HTTPException(status_code=401, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
-    return username
-

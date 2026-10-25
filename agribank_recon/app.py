@@ -10,7 +10,6 @@ import shutil
 import tempfile
 import time
 import uuid
-from io import BytesIO
 from typing import Literal
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile, File, Form
@@ -63,6 +62,15 @@ async def set_security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'"
+    )
+    if config.COOKIE_SECURE or request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
     if request.url.path.startswith(("/api/", "/health/")):
         response.headers["Cache-Control"] = "no-store"
     if not request.url.path.startswith("/health/"):
@@ -101,32 +109,44 @@ class AuditDecisionRequest(BaseModel):
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
+def require_same_origin(request: Request) -> None:
+    origin = request.headers.get("origin", "").rstrip("/")
+    expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+    # Non-browser API clients can omit Origin; browsers must provide the real
+    # origin for unsafe cookie requests. Fetch Metadata also blocks hostile sites.
+    if (origin and origin != expected_origin) or request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
+
+
 def current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ):
     if credentials is not None and credentials.scheme.lower() == "bearer":
-        username = verify_access_token(credentials.credentials)
+        token = credentials.credentials
     else:
-        username = request.cookies.get("agribank_access")
-        if username:
+        token = request.cookies.get("agribank_access")
+        if token:
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
-                origin = request.headers.get("origin", "").rstrip("/")
-                expected_origin = f"{request.url.scheme}://{request.url.netloc}"
-                if not origin or origin != expected_origin:
+                require_same_origin(request)
+                if not request.headers.get("origin"):
                     raise HTTPException(status_code=403, detail="Cross-origin request rejected")
-            username = verify_access_token(username)
+    username = verify_access_token(token) if token else None
     if username is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
     conn = get_db_connection()
     try:
         user = conn.execute(
-            "SELECT username, role, is_active FROM app_users WHERE LOWER(username) = LOWER(?)", (username,)
+            """SELECT u.username, u.role, u.is_active FROM app_users u
+               JOIN app_sessions s ON s.username = u.username
+               WHERE LOWER(u.username) = LOWER(?) AND s.token_hash = ? AND s.expires_at > ?""",
+            (username, hashlib.sha256(token.encode("ascii")).hexdigest(), time.time()),
         ).fetchone()
     finally:
         conn.close()
     if user is None or not user["is_active"]:
         raise HTTPException(status_code=401, detail="Invalid or disabled account", headers={"WWW-Authenticate": "Bearer"})
+    request.state.token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
     return {"username": user["username"], "role": user["role"]}
 
 
@@ -194,6 +214,8 @@ def set_user_active(username: str, req: UserActiveRequest, user=Depends(require_
                 raise HTTPException(status_code=409, detail="At least one active administrator is required")
         conn.execute("UPDATE app_users SET is_active = ? WHERE LOWER(username) = LOWER(?)",
                      (int(req.is_active), username))
+        if not req.is_active:
+            conn.execute("DELETE FROM app_sessions WHERE username = ?", (target["username"],))
         conn.commit()
     finally:
         conn.close()
@@ -201,6 +223,7 @@ def set_user_active(username: str, req: UserActiveRequest, user=Depends(require_
 
 @app.post("/api/login")
 def login(req: LoginRequest, request: Request, response: Response):
+    require_same_origin(request)
     now = time.time()
     client_ip = request.client.host if request.client else "unknown"
     ip_hash = hmac.new(config.JWT_SECRET.encode(), f"login-ip:{client_ip}".encode("utf-8"), hashlib.sha256).hexdigest()
@@ -223,36 +246,60 @@ def login(req: LoginRequest, request: Request, response: Response):
         if ip_attempts >= 20 or account_attempts >= 10:
             conn.commit()
             logger.warning("login_rejected request_id=%s reason=throttled", request.state.request_id)
-            raise HTTPException(status_code=429, detail="Too many failed login attempts; try again later")
+            raise HTTPException(status_code=429, detail="Too many login attempts; try again later")
+        # Reserve the attempt before expensive password hashing, so concurrent
+        # requests cannot bypass the quota. Successful logins do not reset it.
+        conn.execute(
+            "INSERT INTO login_attempts (ip_hash, username_hash, attempted_at) VALUES (?, ?, ?)",
+            (ip_hash, username_hash, now),
+        )
+        conn.commit()
         user = conn.execute(
             "SELECT username, password_hash, role, is_active FROM app_users WHERE LOWER(username) = LOWER(?)",
             (req.username.strip(),),
         ).fetchone()
-        password_ok = verify_password(req.password, user["password_hash"] if user else config.APP_PASSWORD_HASH)
-        if user is None or not user["is_active"] or not password_ok:
-            conn.execute(
-                "INSERT INTO login_attempts (ip_hash, username_hash, attempted_at) VALUES (?, ?, ?)",
-                (ip_hash, username_hash, now),
-            )
-            conn.commit()
-            logger.warning("login_rejected request_id=%s reason=invalid_credentials", request.state.request_id)
+    finally:
+        conn.close()
+    # Do not hold the global writer/advisory lock while running scrypt.
+    password_ok = verify_password(req.password, user["password_hash"] if user else config.APP_PASSWORD_HASH)
+    if user is None or not user["is_active"] or not password_ok:
+        logger.warning("login_rejected request_id=%s reason=invalid_credentials", request.state.request_id)
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token, expires_in = create_access_token(user["username"])
+    conn = get_db_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        fresh_user = conn.execute(
+            "SELECT password_hash, is_active, role FROM app_users WHERE username = ?", (user["username"],)
+        ).fetchone()
+        if (fresh_user is None or not fresh_user["is_active"]
+                or fresh_user["password_hash"] != user["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid username or password")
-        conn.execute("DELETE FROM login_attempts WHERE ip_hash = ? OR username_hash = ?", (ip_hash, username_hash))
+        conn.execute("DELETE FROM app_sessions WHERE expires_at <= ?", (time.time(),))
+        conn.execute(
+            "INSERT INTO app_sessions (token_hash, username, expires_at) VALUES (?, ?, ?)",
+            (hashlib.sha256(token.encode("ascii")).hexdigest(), user["username"], now + expires_in),
+        )
         conn.commit()
     finally:
         conn.close()
-    token, expires_in = create_access_token(user["username"])
     response.set_cookie(
         key="agribank_access", value=token, max_age=expires_in, httponly=True,
         secure=config.COOKIE_SECURE or request.url.scheme == "https", samesite="strict", path="/",
     )
     logger.info("login_succeeded request_id=%s", request.state.request_id)
     return {"token_type": "cookie", "expires_in": expires_in,
-            "username": user["username"], "role": user["role"]}
+            "username": user["username"], "role": fresh_user["role"]}
 
 
 @app.post("/api/logout")
 def logout(request: Request, response: Response, _user=Depends(current_user)):
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM app_sessions WHERE token_hash = ?", (request.state.token_hash,))
+        conn.commit()
+    finally:
+        conn.close()
     response.delete_cookie(
         key="agribank_access", path="/", secure=config.COOKIE_SECURE or request.url.scheme == "https",
         httponly=True, samesite="strict",
@@ -661,9 +708,9 @@ def get_audit_logs(
         if value:
             try:
                 parsed = date.fromisoformat(value)
-            except ValueError as error:
+                bound = parsed.isoformat() if operator == ">=" else (parsed + timedelta(days=1)).isoformat()
+            except (ValueError, OverflowError) as error:
                 raise HTTPException(status_code=422, detail="Dates must use YYYY-MM-DD format") from error
-            bound = parsed.isoformat() if operator == ">=" else (parsed + timedelta(days=1)).isoformat()
             clauses.append(f"created_at {operator} ?")
             params.append(bound)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -686,14 +733,35 @@ def parse_uploaded_csv(filename: str | None, payload: bytes, label: str) -> pd.D
         raise HTTPException(status_code=413, detail=f"{label} CSV exceeds the 10 MB limit")
 
     try:
-        header = next(csv.reader(io.StringIO(payload.decode("utf-8-sig"), newline="")))
+        reader = csv.reader(io.StringIO(payload.decode("utf-8-sig"), newline=""), strict=True)
+        header = next(reader)
         normalized_header = [str(column).strip().lower() for column in header]
+        if not 3 <= len(header) <= 100:
+            raise HTTPException(status_code=422, detail=f"{label} CSV must have between 3 and 100 columns")
         if len(set(normalized_header)) != len(normalized_header):
             raise HTTPException(status_code=422, detail=f"{label} CSV has duplicate column names")
-        frame = pd.read_csv(
-            BytesIO(payload), encoding="utf-8-sig", dtype={"trans_id": "string", "amount": "string"},
-            keep_default_na=False,
-        )
+        required = ("trans_id", "amount", "status")
+        missing = sorted(set(required) - set(normalized_header))
+        if missing:
+            raise HTTPException(status_code=422, detail=f"{label} CSV is missing required columns: {', '.join(missing)}")
+        indexes = [normalized_header.index(column) for column in required]
+        records = []
+        for row in reader:
+            if not row:
+                continue
+            if len(row) != len(header):
+                raise HTTPException(status_code=422, detail=f"{label} CSV rows must have the same number of columns as the header")
+            record = [row[index] for index in indexes]
+            if any("\x00" in value for value in row):
+                raise HTTPException(status_code=422, detail=f"{label} CSV contains a NUL character")
+            if len(records) >= 250_000:
+                raise HTTPException(status_code=422, detail=f"{label} CSV must contain between 1 and 250,000 rows")
+            if any(len(value.strip()) > limit for value, limit in zip(record, (100, 32, 100))):
+                raise HTTPException(status_code=422, detail=f"{label} CSV contains an oversized transaction ID, amount, or status")
+            records.append(record)
+        # Build only required columns, as strings. Inference before normalizing
+        # header names used to drop leading zeros from transaction identifiers.
+        frame = pd.DataFrame(records, columns=required, dtype="string")
     except HTTPException:
         raise
     except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error, ValueError, StopIteration) as error:
@@ -702,17 +770,9 @@ def parse_uploaded_csv(filename: str | None, payload: bytes, label: str) -> pd.D
             detail=f"{label} CSV cannot be parsed; verify its UTF-8 encoding and CSV quoting",
         ) from error
 
-    frame.columns = [str(column).strip().lower() for column in frame.columns]
-    if len(set(frame.columns)) != len(frame.columns):
-        raise HTTPException(status_code=422, detail=f"{label} CSV has duplicate column names")
-    required = {"trans_id", "amount", "status"}
-    missing = sorted(required - set(frame.columns))
-    if missing:
-        raise HTTPException(status_code=422, detail=f"{label} CSV is missing required columns: {', '.join(missing)}")
     if frame.empty or len(frame) > 250_000:
         raise HTTPException(status_code=422, detail=f"{label} CSV must contain between 1 and 250,000 rows")
 
-    frame = frame[["trans_id", "amount", "status"]].copy()
     frame["trans_id"] = frame["trans_id"].astype("string").str.strip()
     if frame["trans_id"].isna().any() or frame["trans_id"].eq("").any():
         raise HTTPException(status_code=422, detail=f"{label} CSV contains a blank transaction ID")
