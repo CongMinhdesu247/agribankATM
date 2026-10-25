@@ -28,7 +28,7 @@ class RequestBodyLimitTests(unittest.IsolatedAsyncioTestCase):
             await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": b"ok"})
 
-        middleware = RequestBodyLimitMiddleware(app, max_upload_body_bytes=limit, max_body_bytes=5)
+        middleware = RequestBodyLimitMiddleware(app, max_upload_body_bytes=limit, max_body_bytes=5, max_restore_body_bytes=8)
         scope = {"type": "http", "path": path, "method": method, "headers": list(headers)}
         await middleware(scope, receive, send)
         status = next(item["status"] for item in sent if item["type"] == "http.response.start")
@@ -57,6 +57,13 @@ class RequestBodyLimitTests(unittest.IsolatedAsyncioTestCase):
     async def test_upload_trailing_slash_uses_upload_limit(self):
         status, _ = await self.invoke(chunks=[b"123456"], path="/api/upload-preview/", limit=6)
         self.assertEqual(status, 200)
+
+    async def test_resume_csv_has_a_separate_bounded_upload_budget(self):
+        self.assertEqual((await self.invoke(path="/api/suspensions/resume", chunks=[b"12345678"]))[0], 200)
+        self.assertEqual((await self.invoke(path="/api/suspensions/resume/", chunks=[b"12345", b"6789"]))[0], 413)
+        status, app_called = await self.invoke(path="/api/suspensions/resume", headers=[(b"content-length", b"9")])
+        self.assertEqual(status, 413)
+        self.assertFalse(app_called)
 
     async def test_limits_other_methods(self):
         status, _ = await self.invoke(chunks=[b"123456"], path="/api/users/admin/active", method="PATCH")

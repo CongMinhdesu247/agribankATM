@@ -19,6 +19,8 @@ TABLES_IN_COPY_ORDER = (
     "reconciliation_baseline_state",
     "app_users",
     "login_attempts",
+    "reconciliation_suspensions",
+    "reconciliation_suspension_items",
 )
 def _read_source(path: Path):
     connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)

@@ -15,10 +15,12 @@ class _RequestTooLarge(Exception):
 
 
 class RequestBodyLimitMiddleware:
-    def __init__(self, app: ASGIApp, *, max_upload_body_bytes: int, max_body_bytes: int = 64 * 1024) -> None:
+    def __init__(self, app: ASGIApp, *, max_upload_body_bytes: int, max_body_bytes: int = 64 * 1024,
+                 max_restore_body_bytes: int = 65 * 1024 * 1024) -> None:
         self.app = app
         self.max_upload_body_bytes = max_upload_body_bytes
         self.max_body_bytes = max_body_bytes
+        self.max_restore_body_bytes = max_restore_body_bytes
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -28,6 +30,8 @@ class RequestBodyLimitMiddleware:
         limit = self.max_upload_body_bytes if path in {
             "/api/upload-preview", "/api/upload-and-reconcile",
         } and scope.get("method") == "POST" else self.max_body_bytes
+        if path == "/api/suspensions/resume" and scope.get("method") == "POST":
+            limit = self.max_restore_body_bytes
         request_id = uuid.uuid4().hex
 
         headers = dict(scope.get("headers", []))

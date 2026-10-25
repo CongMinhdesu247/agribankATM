@@ -209,11 +209,26 @@
                         <div class="small text-muted" id="workflow-counts" aria-live="polite"></div>
                         <div class="small text-muted" id="workflow-guidance"></div>
                     </div>
-                    <button type="button" id="close-run-button" class="btn btn-outline-success d-none" disabled data-click="closeCurrentRun">Đóng đợt đã hoàn tất</button>
+                    <div class="d-flex flex-wrap gap-2">
+                        <button type="button" id="close-run-button" class="btn btn-outline-success d-none" disabled data-click="closeCurrentRun">Đóng đợt đã hoàn tất</button>
+                        <button type="button" id="suspend-run-button" class="btn btn-warning d-none" disabled data-click="suspendCurrentRun">Lưu CSV và tạm dừng</button>
+                        <button type="button" id="urgent-upload-button" class="btn btn-danger d-none" disabled data-bs-toggle="modal" data-bs-target="#uploadModal">Upload cặp file xử lý gấp</button>
+                    </div>
                 </div>
                 <div id="workflow-stale" class="alert alert-warning m-3 mt-0 d-none" role="alert">
-                    Đợt đối soát đã thay đổi hoặc đã đóng. Vui lòng tải lại dữ liệu trước khi thao tác.
+                    Đợt đối soát đã thay đổi, tạm dừng hoặc đã đóng. Vui lòng tải lại dữ liệu trước khi thao tác.
                     <button type="button" class="btn btn-sm btn-outline-dark ms-2" data-click="reloadWorkflow">Tải lại dữ liệu</button>
+                </div>
+            </section>
+            <section id="suspensions-panel" class="card border-0 shadow-sm mb-3 d-none" aria-label="Tiếp tục công việc đã lưu">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                        <h6 class="fw-bold m-0">Các đợt đang tạm dừng</h6>
+                        <label id="resume-run-label" class="btn btn-outline-primary disabled m-0" for="resume-run-file">Nhập CSV để tiếp tục đợt cũ</label>
+                        <input type="file" id="resume-run-file" class="visually-hidden" accept=".csv" disabled data-change="resumeSavedRun">
+                    </div>
+                    <p class="small text-muted mb-2">Hoàn tất và đóng đợt khẩn trước khi nhập lại CSV đã lưu. Giữ nguyên file CSV; nếu thất lạc, có thể tải lại bên dưới.</p>
+                    <div id="suspensions-list" class="small" aria-live="polite"></div>
                 </div>
             </section>
             <ul class="nav nav-tabs mb-3" id="mainTab" role="tablist">

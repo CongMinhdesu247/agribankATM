@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from . import config, reconcile_engine
+from . import config, reconcile_engine, suspensions
 from .database import connect_database, get_table_columns, is_integrity_error
 from .request_limits import RequestBodyLimitMiddleware
 from .security import create_access_token, hash_password, verify_access_token, verify_password
@@ -84,6 +84,7 @@ async def set_security_headers(request: Request, call_next):
 app.add_middleware(
     RequestBodyLimitMiddleware,
     max_upload_body_bytes=(2 * config.MAX_UPLOAD_BYTES) + 1024 * 1024,
+    max_restore_body_bytes=suspensions.MAX_CSV_BYTES + 1024 * 1024,
 )
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.ALLOWED_HOSTS))
 
@@ -402,7 +403,7 @@ def list_reconciliation_runs(page: int = 1, page_size: int = 25, _user=Depends(c
         total = conn.execute("SELECT COUNT(*) FROM reconciliation_runs").fetchone()[0]
         rows = conn.execute("""
             SELECT run_id, created_at, performed_by, core_filename, partner_filename,
-                   transaction_count, matched_count, discrepancy_count, closed_at, closed_by
+                   transaction_count, matched_count, discrepancy_count, closed_at, closed_by, suspended_at
             FROM reconciliation_runs ORDER BY created_at DESC, run_id DESC LIMIT ? OFFSET ?
         """, (page_size, (page - 1) * page_size)).fetchall()
     finally:
@@ -514,6 +515,88 @@ class CloseRunRequest(BaseModel):
 def close_run(req: CloseRunRequest, user=Depends(require_role("admin"))):
     try:
         return reconcile_engine.close_reconciliation_run(req.run_id, user["username"])
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+def suspension_csv_response(suspension_id):
+    conn = get_db_connection()
+    try:
+        suspension = suspensions.get_export(conn, suspension_id)
+    except Exception as error:
+        conn.close()
+        if isinstance(error, ValueError):
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        raise
+
+    def stream():
+        try:
+            yield from suspensions.csv_chunks(conn, suspension)
+        finally:
+            conn.close()
+
+    return StreamingResponse(stream(), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="tam_dung_{suspension["suspension_id"]}.csv"',
+        "X-Suspension-ID": suspension["suspension_id"],
+        "X-Reconciliation-Run-ID": suspension["run_id"],
+    })
+
+
+@app.post("/api/suspensions/export")
+def suspend_and_export(req: CloseRunRequest, user=Depends(require_role("admin"))):
+    try:
+        result = suspensions.prepare_export(req.run_id, user["username"])
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return suspension_csv_response(result["suspension_id"])
+
+
+class SuspensionAcknowledgeRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=100)
+    csv_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@app.post("/api/suspensions/{suspension_id}/acknowledge")
+def acknowledge_suspension(suspension_id: str, req: SuspensionAcknowledgeRequest, user=Depends(require_role("admin"))):
+    try:
+        return suspensions.acknowledge_export(suspension_id, req.run_id, req.csv_hash, user["username"])
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/api/suspensions")
+def list_suspensions(_user=Depends(require_role("admin"))):
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""SELECT s.suspension_id, s.run_id, s.exported_at, s.exported_by,
+            s.transaction_count, s.pending_count, s.file_size, s.status FROM reconciliation_suspensions s
+            JOIN reconciliation_runs r ON r.active_suspension_id = s.suspension_id
+            WHERE r.suspended_at IS NOT NULL AND s.status IN ('PREPARED', 'READY')
+            ORDER BY s.exported_at DESC, s.suspension_id DESC""").fetchall()
+    finally:
+        conn.close()
+    return {"data": [dict(row) for row in rows]}
+
+
+@app.get("/api/suspensions/{suspension_id}.csv")
+def download_suspension(suspension_id: str, _user=Depends(require_role("admin"))):
+    return suspension_csv_response(suspension_id)
+
+
+@app.post("/api/suspensions/resume")
+def resume_suspension(saved_file: UploadFile = File(...), expected_run_id: str = Form(default=""),
+                      user=Depends(require_role("admin"))):
+    if not saved_file.filename or Path(saved_file.filename).suffix.lower() != ".csv":
+        raise HTTPException(status_code=415, detail="Vui lòng chọn file CSV công việc đã lưu.")
+    payload = saved_file.file.read(suspensions.MAX_CSV_BYTES + 1)
+    if len(payload) > suspensions.MAX_CSV_BYTES:
+        raise HTTPException(status_code=413, detail="File CSV công việc không được vượt quá 64 MB.")
+    try:
+        suspensions.inspect_manifest(payload)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    try:
+        return suspensions.resume_export(payload, expected_run_id or None, user["username"])
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
@@ -714,10 +797,14 @@ def get_audit_logs(
         total = conn.execute(f"SELECT COUNT(*) FROM audit_logs{where}", params).fetchone()[0]
         rows = conn.execute(f"SELECT * FROM audit_logs{where} ORDER BY created_at DESC, log_id DESC LIMIT ? OFFSET ?",
                             [*params, page_size, (page - 1) * page_size]).fetchall()
+        active = conn.execute("SELECT run_id FROM reconciliation_results LIMIT 1").fetchone()
+        paused = {row[0] for row in conn.execute("SELECT run_id FROM reconciliation_runs WHERE suspended_at IS NOT NULL").fetchall()}
+        data = [{**dict(row), "run_suspended": row["run_id"] in paused,
+                 "is_current_run": bool(active and row["run_id"] == active[0])} for row in rows]
     finally:
         conn.close()
     return {"status": "success", "count": total, "page": page, "page_size": page_size,
-            "data": [dict(row) for row in rows]}
+            "data": data}
 
 def parse_uploaded_csv(filename: str | None, payload: bytes, label: str) -> pd.DataFrame:
     if not filename or Path(filename).suffix.lower() != ".csv":

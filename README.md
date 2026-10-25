@@ -24,7 +24,7 @@ Run the automated unit tests with `python -m unittest discover -s tests -v`.
 
 The security review and verification results are recorded in [docs/security-review.md](docs/security-review.md).
 
-The local demo dataset can be regenerated with `python -m scripts.generate_data`, followed by `python -m agribank_recon.reconcile_engine`. Creating a new run requires completing and closing any current run first; this rule also applies to the CLI. Back up the database first if its current state matters.
+The local demo dataset can be regenerated with `python -m scripts.generate_data`, followed by `python -m agribank_recon.reconcile_engine`. Creating a new run requires completing/closing the current run or explicitly suspending it with a verified CSV export; this rule also applies to the CLI. Back up the database first if its current state matters.
 
 ## CSV upload contract
 
@@ -49,7 +49,17 @@ The API checks these rules inside the same serialized transaction as the data ch
 
 Uploading the same normalized business content opens the existing run in history instead of resetting its workflow. Filenames, CSV row order, and equivalent numeric formatting do not make a new run; changes to required transaction values do. History is read-only and is not reactivated by uploading old files. The reset-to-baseline UI was removed, and its legacy endpoint returns 410, so it cannot bypass closure controls.
 
-On deployment, migration version 2 adds closure/content-hash metadata and persistent snapshot resolution states. It preserves the current run, current resolutions, and pending reviews. Older inactive runs are labeled as archived before the upgrade; that label does not certify they completed the new closure process. Legacy rows without a run are assigned a run and preserved. The original baseline tables remain for data compatibility, without an online reset action. Deferred reviews and carrying unresolved work into another run are not implemented: finish the current run before activating the next one.
+On deployment, migration version 2 adds closure/content-hash metadata and persistent snapshot resolution states. It preserves the current run, current resolutions, and pending reviews. Older inactive runs are labeled as archived before the upgrade; that label does not certify they completed the new closure process. Legacy rows without a run are assigned a run and preserved. The original baseline tables remain for data compatibility, without an online reset action.
+
+### Urgent runs: save CSV, suspend, then resume
+
+An administrator can select **Save CSV and suspend** when the current run still has unprocessed transactions or pending approvals. The server saves a durable, immutable snapshot and freezes writes to that run. The CSV contains only outstanding transactions, with pending request IDs, proposers, actions, references, and notes. The browser verifies the complete downloaded response's SHA-256 hash against the server before the separate **Upload urgent pair** button is enabled. This confirms receipt of the response, not that the operating system finished saving it to disk; the administrator should retain the downloaded file.
+
+After completing and closing the urgent run, use **Import CSV to resume old run**. The server requires the original, unmodified export from the same database, verifies its full hash and current workflow, restores the original run, and reuses existing pending audit records. Previously approved transactions stay approved. Modified files, stale-page imports, imports over unfinished active work, and reuse of a consumed export are rejected. A run may instead be explicitly saved/suspended before switching back to another saved run.
+
+The **Suspended runs** panel lists saved work and can re-download an identical CSV if a download failed or the local file was lost. A failed download keeps urgent upload locked. Importing a complete CSV also permits returning directly to its currently paused run without opening an urgent run. Exports are limited to 64 MiB and contain transaction data; do not commit or share them. Opening is allowed for inspection, but resaving in Excel can alter bytes and invalidate restoration. The export is a workflow handoff, not a standalone database backup: it relies on retained records in the same application database.
+
+Migration version 3 adds suspension metadata and snapshot tables for SQLite and PostgreSQL. Pending counts and approval controls are scoped to the active run, so a suspended backlog does not block a completed urgent run. All export/acknowledgement/resume/download/list APIs are admin-only. See [the Vietnamese workflow guide](docs/run-workflow.md). Optional browser-protocol tests use Node's built-in runner: `node --test tests/test_suspension_ui.js`.
 
 Review actions are submitted by an administrator or operator and remain pending until a different administrator or approver approves or rejects them. Only approved reviews are marked resolved. The admin account created by `scripts.setup_admin` can create administrator, operator, and approver accounts in **Account Management** and disable accounts; disabled users lose access immediately. Account records and roles are stored in the configured database.
 

@@ -3,6 +3,9 @@
 import asyncio
 import importlib
 import json
+import csv
+import io
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -14,7 +17,7 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 
-from agribank_recon import config, reconcile_engine
+from agribank_recon import config, reconcile_engine, suspensions
 from agribank_recon.security import create_access_token, hash_password, verify_access_token
 
 
@@ -458,6 +461,174 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reconcile_engine.fingerprint_rows(rows), reconcile_engine.fingerprint_rows(list(reversed(rows))))
         changed = [("A", 101, 100, "SUCCESS", "SUCCESS", "AMOUNT_MISMATCH"), rows[1]]
         self.assertNotEqual(reconcile_engine.fingerprint_rows(rows), reconcile_engine.fingerprint_rows(changed))
+
+    async def suspension_scenario(self):
+        self.add_user("operator", "operator")
+        self.add_user("approver", "approver")
+        admin, operator, approver = await self.token(), await self.token("operator"), await self.token("approver")
+        run_id = reconcile_engine.replace_reconciliation_results([
+            ("matched", 100, 100, "SUCCESS", "SUCCESS", "MATCHED"),
+            ("done", 100, 101, "SUCCESS", "SUCCESS", "AMOUNT_MISMATCH"),
+            ("pending", 100, 102, "SUCCESS", "SUCCESS", "AMOUNT_MISMATCH"),
+            ("unprocessed", 100, 103, "SUCCESS", "SUCCESS", "AMOUNT_MISMATCH"),
+        ], performed_by="admin")
+        for trans_id in ("done", "pending"):
+            status, _, _ = await self.request("/api/resolve", method="POST", data={
+                "run_id": run_id, "trans_id": trans_id, "action_type": "REFUND",
+                "napas_ref_code": "@reference", "reason": "=Needs investigation",
+            }, headers={"authorization": f"Bearer {operator}"})
+            self.assertEqual(status, 200)
+            if trans_id == "done":
+                self.assertEqual((await self.request("/api/audit-logs/1/decision", method="POST",
+                    data={"decision": "APPROVE"}, headers={"authorization": f"Bearer {approver}"}))[0], 200)
+        return admin, operator, approver, run_id
+
+    async def export_work(self, token, run_id):
+        return await self.request("/api/suspensions/export", method="POST", data={"run_id": run_id},
+                                  headers={"authorization": f"Bearer {token}"})
+
+    async def acknowledge_work(self, token, run_id, suspension_id, payload):
+        return await self.request(f"/api/suspensions/{suspension_id}/acknowledge", method="POST", data={
+            "run_id": run_id, "csv_hash": hashlib.sha256(payload).hexdigest(),
+        }, headers={"authorization": f"Bearer {token}"})
+
+    async def resume_work(self, token, payload, expected_run_id):
+        body = (b'--resume\r\nContent-Disposition: form-data; name="saved_file"; filename="saved.csv"\r\n'
+                b'Content-Type: text/csv\r\n\r\n' + payload +
+                b'\r\n--resume\r\nContent-Disposition: form-data; name="expected_run_id"\r\n\r\n' +
+                expected_run_id.encode() + b'\r\n--resume--\r\n')
+        return await self.request("/api/suspensions/resume", method="POST", body=body, headers={
+            "authorization": f"Bearer {token}", "content-type": "multipart/form-data; boundary=resume",
+        })
+
+    async def test_export_contains_only_outstanding_work_and_unlocks_only_after_complete_download(self):
+        admin, _, approver, run_id = await self.suspension_scenario()
+        status, headers, payload = await self.export_work(admin, run_id)
+        self.assertEqual(status, 200)
+        records = list(csv.DictReader(io.StringIO(payload.decode("utf-8-sig"))))
+        self.assertEqual(records[0]["record_type"], "MANIFEST")
+        self.assertEqual(records[0]["transaction_count"], "2")
+        items = {row["trans_id"]: row for row in records[1:]}
+        self.assertEqual(set(items), {"pending", "unprocessed"})
+        self.assertEqual(items["pending"]["processing_status"], "PENDING")
+        self.assertEqual(items["pending"]["pending_log_id"], "2")
+        self.assertTrue(items["pending"]["reason"].startswith("'="))
+        self.assertTrue(items["pending"]["napas_ref_code"].startswith("'@"))
+        self.assertEqual(items["unprocessed"]["processing_status"], "UNPROCESSED")
+        state = await self.workflow(admin)
+        self.assertTrue(state["suspended"])
+        self.assertFalse(state["can_upload"])
+        self.assertFalse(state["export_ready"])
+        self.assertEqual((await self.upload_pair(admin, expected_run_id=run_id))[0], 409)
+        self.assertEqual((await self.request("/api/audit-logs/2/decision", method="POST", data={"decision": "APPROVE"},
+                                            headers={"authorization": f"Bearer {approver}"}))[0], 409)
+        suspension_id = headers["x-suspension-id"]
+        self.assertEqual((await self.acknowledge_work(admin, run_id, suspension_id, payload[:-1]))[0], 409)
+        self.assertFalse((await self.workflow(admin))["can_upload"])
+        self.assertEqual((await self.acknowledge_work(admin, run_id, suspension_id, payload))[0], 200)
+        state = await self.workflow(admin)
+        self.assertTrue(state["can_upload"])
+        self.assertFalse(state["closed"])
+        self.assertTrue(state["export_ready"])
+
+    async def test_urgent_run_then_csv_resume_keeps_pending_identity_and_previously_approved_items(self):
+        admin, _, approver, run_id = await self.suspension_scenario()
+        status, headers, payload = await self.export_work(admin, run_id)
+        self.assertEqual(status, 200)
+        self.assertEqual((await self.acknowledge_work(admin, run_id, headers["x-suspension-id"], payload))[0], 200)
+        self.assertEqual((await self.upload_pair(admin, expected_run_id=run_id))[0], 200)
+        urgent_id = (await self.workflow(admin))["run_id"]
+        self.assertEqual((await self.workflow(admin))["pending_count"], 0)
+        # The unfinished urgent run cannot be overwritten by an old CSV.
+        self.assertEqual((await self.resume_work(admin, payload, urgent_id))[0], 409)
+        self.assertEqual((await self.propose_review(admin, urgent_id))[0], 200)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            urgent_log = connection.execute("SELECT log_id FROM audit_logs WHERE run_id = ? AND review_status = 'PENDING'", (urgent_id,)).fetchone()[0]
+        self.assertEqual((await self.request(f"/api/audit-logs/{urgent_log}/decision", method="POST", data={"decision": "APPROVE"},
+                                            headers={"authorization": f"Bearer {approver}"}))[0], 200)
+        self.assertEqual((await self.close_workflow(admin, urgent_id))[0], 200)
+        self.assertEqual((await self.resume_work(admin, payload, run_id))[0], 409)  # stale page
+        status, _, result = await self.resume_work(admin, payload, urgent_id)
+        self.assertEqual(status, 200)
+        state = json.loads(result)
+        self.assertEqual(state["run_id"], run_id)
+        self.assertFalse(state["suspended"])
+        self.assertEqual((state["unprocessed_count"], state["pending_count"]), (1, 1))
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT resolved FROM reconciliation_results WHERE trans_id = 'done'").fetchone()[0], 1)
+            pending = connection.execute("SELECT log_id, performed_by, reason FROM audit_logs WHERE run_id = ? AND review_status = 'PENDING'", (run_id,)).fetchall()
+            self.assertEqual(pending, [(2, "operator", "=Needs investigation")])
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM reconciliation_runs").fetchone()[0], 2)
+        self.assertEqual((await self.request("/api/audit-logs/2/decision", method="POST", data={"decision": "APPROVE"},
+                                            headers={"authorization": f"Bearer {approver}"}))[0], 200)
+        self.assertEqual((await self.resume_work(admin, payload, run_id))[0], 409)  # consumed file
+
+    async def test_csv_tampering_and_wrong_format_cannot_change_work_or_unlock_upload(self):
+        admin, _, _, run_id = await self.suspension_scenario()
+        _, _, payload = await self.export_work(admin, run_id)
+        self.assertEqual((await self.resume_work(admin, payload.replace(b"103", b"999"), run_id))[0], 409)
+        self.assertEqual((await self.resume_work(admin, b"trans_id,amount,status\nx,1,SUCCESS\n", run_id))[0], 422)
+        state = await self.workflow(admin)
+        self.assertTrue(state["suspended"])
+        self.assertFalse(state["can_upload"])
+        self.assertEqual((state["unprocessed_count"], state["pending_count"]), (1, 1))
+
+    async def test_failed_download_can_be_retried_and_lost_csv_can_be_downloaded_again(self):
+        admin, _, _, run_id = await self.suspension_scenario()
+        _, headers, payload = await self.export_work(admin, run_id)
+        status, retry_headers, retry_payload = await self.export_work(admin, run_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["x-suspension-id"], retry_headers["x-suspension-id"])
+        self.assertEqual(payload, retry_payload)
+        status, _, listing = await self.request("/api/suspensions", headers={"authorization": f"Bearer {admin}"})
+        self.assertEqual(status, 200)
+        saved = json.loads(listing)["data"]
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["status"], "PREPARED")
+        status, _, downloaded = await self.request(f'/api/suspensions/{saved[0]["suspension_id"]}.csv',
+                                                   headers={"authorization": f"Bearer {admin}"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, downloaded)
+        # A complete file also lets admin undo a prepared pause without an urgent upload.
+        self.assertEqual((await self.resume_work(admin, downloaded, run_id))[0], 200)
+        self.assertFalse((await self.workflow(admin))["suspended"])
+
+    async def test_pause_resume_permissions_and_concurrent_resume_are_enforced(self):
+        admin, operator, approver, run_id = await self.suspension_scenario()
+        _, headers, payload = await self.export_work(admin, run_id)
+        suspension_id = headers["x-suspension-id"]
+        for token in (operator, approver):
+            self.assertEqual((await self.export_work(token, run_id))[0], 403)
+            self.assertEqual((await self.acknowledge_work(token, run_id, suspension_id, payload))[0], 403)
+            self.assertEqual((await self.resume_work(token, payload, run_id))[0], 403)
+            for path in ("/api/suspensions", f"/api/suspensions/{suspension_id}.csv"):
+                self.assertEqual((await self.request(path, headers={"authorization": f"Bearer {token}"}))[0], 403)
+        results = await asyncio.gather(self.resume_work(admin, payload, run_id), self.resume_work(admin, payload, run_id))
+        self.assertEqual(sorted(result[0] for result in results), [200, 409])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM audit_logs WHERE action_type = 'RESUME_RUN'").fetchone()[0], 1)
+
+    async def test_failed_export_rolls_back_pause_and_saved_rows(self):
+        admin, _, _, run_id = await self.suspension_scenario()
+        with patch.object(suspensions, "MAX_CSV_BYTES", 10):
+            self.assertEqual((await self.export_work(admin, run_id))[0], 409)
+        state = await self.workflow(admin)
+        self.assertFalse(state["suspended"])
+        self.assertEqual((state["unprocessed_count"], state["pending_count"]), (1, 1))
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM reconciliation_suspensions").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM reconciliation_suspension_items").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM audit_logs WHERE action_type = 'SUSPEND_RUN'").fetchone()[0], 0)
+
+    async def test_saved_work_survives_reinitialization_and_jwt_secret_rotation(self):
+        admin, _, _, run_id = await self.suspension_scenario()
+        _, _, payload = await self.export_work(admin, run_id)
+        reconcile_engine.initialize_database()
+        self.assertTrue((await self.workflow(admin))["suspended"])
+        with patch.object(config, "JWT_SECRET", "rotated-test-secret-only-" * 4):
+            new_admin = await self.token()
+            self.assertEqual((await self.resume_work(new_admin, payload, run_id))[0], 200)
+            self.assertEqual((await self.workflow(new_admin))["pending_count"], 1)
 
     def test_csv_preserves_ids_with_normalized_headers(self):
         frame = self.web.parse_uploaded_csv("test.csv", b" TRANS_ID , AMOUNT , STATUS ,extra\n0000123,100,SUCCESS,ignored\n", "Core")

@@ -27,5 +27,6 @@ core_log.csv
 partner_log.csv
 core_log_uploaded_last.csv
 partner_log_uploaded_last.csv
+tam_dung_*.csv
 outputs/
 

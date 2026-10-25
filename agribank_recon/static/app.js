@@ -94,20 +94,31 @@ function applyRoleVisibility() {
     document.getElementById('users-nav-item').classList.toggle('d-none', !isAdmin);
     document.getElementById('upload-run-button').classList.toggle('d-none', !isAdmin);
     document.getElementById('close-run-button').classList.toggle('d-none', !isAdmin);
+    document.getElementById('suspend-run-button').classList.toggle('d-none', !isAdmin);
+    document.getElementById('urgent-upload-button').classList.toggle('d-none', !isAdmin);
+    document.getElementById('suspensions-panel').classList.toggle('d-none', !isAdmin);
 }
 
 function renderWorkflow() {
     if (!activeWorkflow) return;
     const state = activeWorkflow;
     document.getElementById('workflow-title').textContent = state.run_id
-        ? `Đợt ${state.run_id} · ${state.closed ? 'Đã đóng' : 'Đang xử lý'}` : 'Chưa có đợt đối soát';
+        ? `Đợt ${state.run_id} · ${state.suspended ? 'Tạm dừng' : state.closed ? 'Đã đóng' : 'Đang xử lý'}` : 'Chưa có đợt đối soát';
     document.getElementById('workflow-counts').textContent = `${state.unprocessed_count} chưa xử lý · ${state.pending_count} chờ duyệt`;
-    document.getElementById('workflow-guidance').textContent = state.can_upload
+    document.getElementById('workflow-guidance').textContent = state.suspended
+        ? state.export_ready ? 'Đã nhận đủ CSV. Admin có thể mở đợt xử lý gấp; công việc cũ đã được giữ lại.'
+        : 'Đợt đã được giữ lại, nhưng CSV chưa tải xong. Hãy tải lại CSV để mở nút upload khẩn, hoặc nhập CSV để tiếp tục đợt này.'
+        : state.can_upload
         ? 'Quản trị viên có thể tải cặp file mới.'
         : state.can_close ? 'Đã hoàn tất xử lý. Quản trị viên cần đóng đợt trước khi tải cặp file mới.'
         : 'Hoàn tất xử lý và phê duyệt trước khi đóng đợt.';
-    document.getElementById('upload-run-button').disabled = workflowStale || !state.can_upload;
+    document.getElementById('upload-run-button').disabled = workflowStale || !state.can_upload || state.suspended;
     document.getElementById('close-run-button').disabled = workflowStale || !state.can_close;
+    document.getElementById('urgent-upload-button').disabled = workflowStale || !state.suspended || !state.export_ready;
+    document.getElementById('suspend-run-button').disabled = workflowStale || !(state.can_suspend || state.suspended);
+    document.getElementById('suspend-run-button').textContent = state.suspended ? 'Tải lại CSV công việc' : 'Lưu CSV và tạm dừng';
+    document.getElementById('resume-run-file').disabled = workflowStale || !state.can_resume;
+    document.getElementById('resume-run-label').classList.toggle('disabled', workflowStale || !state.can_resume);
     document.getElementById('workflow-stale').classList.toggle('d-none', !workflowStale);
 }
 
@@ -115,7 +126,8 @@ async function refreshWorkflow(notify = false) {
     const response = await apiFetch(`${API_URL}/workflow`);
     if (!response.ok) throw new Error('Không tải được trạng thái đợt đối soát.');
     const next = await response.json();
-    if (notify && activeWorkflow && (next.run_id !== activeWorkflow.run_id || next.closed !== activeWorkflow.closed)) {
+    if (notify && activeWorkflow && (next.run_id !== activeWorkflow.run_id || next.closed !== activeWorkflow.closed
+        || next.suspended !== activeWorkflow.suspended)) {
         workflowStale = true;
         resolveModal?.hide();
     } else if (!workflowStale || !notify) {
@@ -146,6 +158,96 @@ async function showExistingRun(runId) {
     await loadRun(runId);
 }
 
+async function saveSuspensionResponse(response) {
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Không xuất được CSV công việc.');
+    }
+    const suspensionId = response.headers.get('X-Suspension-ID');
+    const runId = response.headers.get('X-Reconciliation-Run-ID');
+    const blob = await response.blob();
+    const bytes = await blob.arrayBuffer();
+    const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+        .map(value => value.toString(16).padStart(2, '0')).join('');
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `tam_dung_${suspensionId}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // Only unlock after the entire response has arrived and its hash matches.
+    const acknowledged = await apiFetch(`${API_URL}/suspensions/${encodeURIComponent(suspensionId)}/acknowledge`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({run_id: runId, csv_hash: hash})
+    });
+    const result = await acknowledged.json();
+    if (!acknowledged.ok) throw new Error(result.detail || 'Chưa xác nhận được file CSV đã nhận đầy đủ.');
+}
+
+async function suspendCurrentRun() {
+    if (workflowStale || !activeWorkflow || currentUserRole !== 'admin') return;
+    const runId = activeWorkflow.run_id;
+    if (!activeWorkflow.suspended && !confirm('Lưu toàn bộ việc chưa xử lý và chờ duyệt vào CSV rồi tạm dừng đợt này để xử lý khẩn?')) return;
+    document.getElementById('suspend-run-button').disabled = true;
+    try {
+        const response = await apiFetch(`${API_URL}/suspensions/export`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({run_id: runId})
+        });
+        await saveSuspensionResponse(response);
+    } finally {
+        await loadData();
+    }
+}
+
+async function downloadSuspension(suspensionId) {
+    try {
+        await saveSuspensionResponse(await apiFetch(`${API_URL}/suspensions/${encodeURIComponent(suspensionId)}.csv`));
+    } finally {
+        await loadData();
+    }
+}
+
+async function loadSuspensions() {
+    if (currentUserRole !== 'admin') return;
+    const response = await apiFetch(`${API_URL}/suspensions`);
+    if (!response.ok) throw new Error('Không tải được các đợt tạm dừng.');
+    const {data} = await response.json();
+    const list = document.getElementById('suspensions-list');
+    list.replaceChildren();
+    if (!data.length) { list.textContent = 'Không có đợt đang tạm dừng.'; return; }
+    data.forEach(saved => {
+        const row = document.createElement('div');
+        row.className = 'd-flex flex-wrap gap-2 justify-content-between align-items-center border-top py-2';
+        const label = document.createElement('span');
+        const exportedAt = new Date(saved.exported_at).toLocaleString('vi-VN', {timeZone: 'Asia/Ho_Chi_Minh'});
+        label.textContent = `${exportedAt} · Đợt ${saved.run_id} · ${saved.transaction_count - saved.pending_count} chưa xử lý · ${saved.pending_count} chờ duyệt`;
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'btn btn-sm btn-outline-secondary'; button.textContent = 'Tải lại CSV';
+        button.addEventListener('click', () => downloadSuspension(saved.suspension_id).catch(error => alert(error.message)));
+        row.append(label, button); list.appendChild(row);
+    });
+}
+
+async function resumeSavedRun(event) {
+    const input = event.target, file = input.files[0];
+    if (!file || workflowStale || !activeWorkflow?.can_resume || currentUserRole !== 'admin') return;
+    const expectedRunId = activeWorkflow.run_id || '';
+    try {
+        if (file.size > 64 * 1024 * 1024) throw new Error('File CSV công việc phải nhỏ hơn hoặc bằng 64 MB.');
+        if (!confirm(`Tiếp tục đợt từ file ${file.name}? Hệ thống sẽ kiểm tra bản lưu và giữ nguyên yêu cầu chờ duyệt.`)) return;
+        const data = new FormData();
+        data.append('saved_file', file); data.append('expected_run_id', expectedRunId);
+        const response = await apiFetch(`${API_URL}/suspensions/resume`, {method: 'POST', body: data});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'Không tiếp tục được đợt từ CSV.');
+        await loadData();
+        await loadAuditLogs();
+    } finally {
+        input.value = '';
+    }
+}
+
 setInterval(() => {
     if (currentUserRole && !document.hidden) refreshWorkflow(true).catch(() => {});
 }, 15000);
@@ -173,6 +275,7 @@ async function loadData() {
 
     await populateStatusFilters();
     await loadTransactionPage(1);
+    await loadSuspensions();
 }
 
 async function populateStatusFilters() {
@@ -274,7 +377,7 @@ function renderTransactionsPage() {
         tr.appendChild(statusCell);
 
         const actionCell = addCell('', 'text-center');
-        if (['admin', 'operator'].includes(currentUserRole) && !activeWorkflow?.closed && !workflowStale) {
+        if (['admin', 'operator'].includes(currentUserRole) && !activeWorkflow?.closed && !activeWorkflow?.suspended && !workflowStale) {
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'btn btn-sm btn-danger';
@@ -372,10 +475,11 @@ async function loadAuditLogs() {
         const decisionCell = addCell('');
         const decisionBadge = document.createElement('span');
         decisionBadge.className = `badge ${log.review_status === 'APPROVED' ? 'bg-success' : log.review_status === 'PENDING' ? 'bg-warning text-dark' : 'bg-secondary'}`;
-        decisionBadge.textContent = log.review_status || 'APPROVED';
+        decisionBadge.textContent = log.review_status === 'PENDING' && log.run_suspended ? 'Chờ duyệt · Đợt tạm dừng' : log.review_status || 'APPROVED';
         decisionCell.appendChild(decisionBadge);
         const approvalActionCell = addCell('');
         if (log.review_status === 'PENDING' && ['admin', 'approver'].includes(currentUserRole)
+            && log.is_current_run && !log.run_suspended && !workflowStale
             && log.performed_by.toLowerCase() !== sessionStorage.getItem('agribank_user')?.toLowerCase()) {
             const approve = document.createElement('button');
             approve.type = 'button';
@@ -440,7 +544,7 @@ async function loadRuns() {
         const row = document.createElement('tr');
         [run.created_at, run.performed_by, run.core_filename, run.partner_filename,
             Number(run.transaction_count).toLocaleString(), Number(run.matched_count).toLocaleString(),
-            Number(run.discrepancy_count).toLocaleString(), run.closed_by === 'migration' ? 'Lưu trữ trước nâng cấp' : run.closed_at ? 'Đã đóng' : 'Đang xử lý'].forEach(value => {
+            Number(run.discrepancy_count).toLocaleString(), run.suspended_at ? 'Tạm dừng' : run.closed_by === 'migration' ? 'Lưu trữ trước nâng cấp' : run.closed_at ? 'Đã đóng' : 'Đang xử lý'].forEach(value => {
             const cell = document.createElement('td'); cell.textContent = value ?? ''; row.appendChild(cell);
         });
         const cell = document.createElement('td');
@@ -562,7 +666,7 @@ async function downloadAuditReport() {
 }
 
 function openResolveModal(transId, runId) {
-    if (workflowStale || activeWorkflow?.closed) { alert('Đợt đã thay đổi hoặc đã đóng. Vui lòng tải lại dữ liệu.'); return; }
+    if (workflowStale || activeWorkflow?.closed || activeWorkflow?.suspended) { alert('Đợt đã thay đổi, tạm dừng hoặc đã đóng. Vui lòng tải lại dữ liệu.'); return; }
     resolveRunId = runId;
     document.getElementById('modal-trans-id').value = transId;
     document.getElementById('display-trans-id').value = transId;
@@ -680,6 +784,8 @@ const pageActions = {
     loadRuns: event => loadRuns(),
     loadUsers: event => loadUsers(),
     closeCurrentRun: event => closeCurrentRun(),
+    suspendCurrentRun: event => suspendCurrentRun(),
+    resumeSavedRun: event => resumeSavedRun(event),
     reloadWorkflow: event => loadData(),
     applyTransactionFilters: event => applyTransactionFilters(),
     clearTransactionFilters: event => clearTransactionFilters(),

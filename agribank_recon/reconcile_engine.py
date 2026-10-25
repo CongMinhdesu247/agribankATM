@@ -12,6 +12,7 @@ import pandas as pd
 from . import config
 from .config import BASE_DIR, DB_PATH
 from .database import connect_database, get_table_columns
+from .suspensions import initialize_schema as initialize_suspension_schema
 
 CORE_LOG_PATH = BASE_DIR / "core_log.csv"
 PARTNER_LOG_PATH = BASE_DIR / "partner_log.csv"
@@ -206,6 +207,7 @@ def initialize_database() -> None:
                 """, snapshot_rows)
         conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, CURRENT_TIMESTAMP)")
         initialize_run_workflow(conn)
+        initialize_suspension_schema(conn)
         conn.commit()
 
 
@@ -370,6 +372,7 @@ def initialize_postgres_database() -> None:
                     """, [tuple(row) for row in snapshot_rows])
             conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, CURRENT_TIMESTAMP::text)")
             initialize_run_workflow(conn)
+            initialize_suspension_schema(conn)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -475,14 +478,22 @@ def current_workflow(conn) -> dict:
     run = conn.execute("SELECT * FROM reconciliation_runs WHERE run_id = ?", (current[0],)).fetchone() if current else None
     unresolved = conn.execute("""SELECT COUNT(*) FROM reconciliation_results
         WHERE recon_status != 'MATCHED' AND resolved = 0""").fetchone()[0]
-    pending = conn.execute("SELECT COUNT(*) FROM audit_logs WHERE review_status = 'PENDING'").fetchone()[0]
+    pending = conn.execute("SELECT COUNT(*) FROM audit_logs WHERE review_status = 'PENDING' AND run_id IS ?",
+                           (run["run_id"] if run else None,)).fetchone()[0]
     closed = bool(run and run["closed_at"])
-    return {"run_id": run["run_id"] if run else None, "closed": closed,
+    suspended = bool(run and run["suspended_at"])
+    suspension = conn.execute("SELECT status FROM reconciliation_suspensions WHERE suspension_id = ?",
+                              (run["active_suspension_id"],)).fetchone() if suspended else None
+    export_ready = bool(suspension and suspension["status"] == "READY")
+    can_upload = ((not run or closed) and unresolved == 0 and pending == 0) or (suspended and export_ready)
+    return {"run_id": run["run_id"] if run else None, "closed": closed, "suspended": suspended,
+            "suspension_id": run["active_suspension_id"] if suspended else None, "export_ready": export_ready,
             "closed_at": run["closed_at"] if run else None, "closed_by": run["closed_by"] if run else None,
             "unprocessed_count": max(0, unresolved - pending), "pending_count": pending,
             "unresolved_count": unresolved,
-            "can_close": bool(run) and not closed and unresolved == 0 and pending == 0,
-            "can_upload": (not run or closed) and unresolved == 0 and pending == 0}
+            "can_close": bool(run) and not closed and not suspended and unresolved == 0 and pending == 0,
+            "can_suspend": bool(run) and not closed and not suspended and unresolved > 0,
+            "can_resume": bool(can_upload or suspended), "can_upload": bool(can_upload)}
 
 
 def assert_run_open(conn, expected_run_id: str) -> None:
@@ -491,6 +502,8 @@ def assert_run_open(conn, expected_run_id: str) -> None:
         raise ValueError("Đợt đối soát đã thay đổi. Vui lòng tải lại dữ liệu trước khi thao tác.")
     if state["closed"]:
         raise ValueError("Đợt đối soát đã đóng; không thể thay đổi kết quả xử lý.")
+    if state["suspended"]:
+        raise ValueError("Đợt đang tạm dừng để xử lý khẩn. Admin cần nhập lại CSV để tiếp tục đợt này.")
 
 
 def close_reconciliation_run(run_id: str, username: str) -> dict:
