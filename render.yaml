@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: agribank-atm
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health/ready
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD_HASH
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: UPLOAD_DIR
+        value: /tmp/uploads
+      - key: MAX_UPLOAD_BYTES
+        value: "10485760"
+      - key: ACCESS_TOKEN_TTL_MINUTES
+        value: "60"

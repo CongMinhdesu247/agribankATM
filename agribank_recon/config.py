@@ -49,11 +49,17 @@ APP_USERNAME = os.getenv("APP_USERNAME", "")
 APP_PASSWORD_HASH = os.getenv("APP_PASSWORD_HASH", "")
 ACCESS_TOKEN_TTL_MINUTES = int(os.getenv("ACCESS_TOKEN_TTL_MINUTES", "60"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
-ALLOWED_HOSTS = tuple(
+_allowed_hosts = [
     host.strip().lower()
     for host in os.getenv("APP_ALLOWED_HOSTS", "localhost,127.0.0.1,::1").split(",")
     if host.strip()
-)
+]
+# Render assigns the service hostname at runtime. Include that exact host so the
+# Render deployment works without opening TrustedHostMiddleware to arbitrary hosts.
+_render_hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip().lower()
+if _render_hostname:
+    _allowed_hosts.append(_render_hostname)
+ALLOWED_HOSTS = tuple(dict.fromkeys(_allowed_hosts))
 if not ALLOWED_HOSTS:
     raise RuntimeError("APP_ALLOWED_HOSTS must contain at least one hostname.")
 _upload_dir = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "uploads")))

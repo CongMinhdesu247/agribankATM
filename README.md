@@ -54,6 +54,17 @@ The default output folder is `backups/`. For scheduled backups, use Windows Task
 
 Uploaded source CSV files contain transaction data and are archived under `UPLOAD_DIR`. Inspect expired archive candidates with `python -m scripts.cleanup_uploads --retention-days 90`; delete them only after reviewing the list with `python -m scripts.cleanup_uploads --retention-days 90 --apply`. Schedule the reviewed command according to your retention policy.
 
+## Deploy on Render Free with Aiven PostgreSQL
+
+This is a low-cost demo setup, not a production hosting profile. Render Free web services sleep after 15 minutes without traffic and lose local files when they restart or sleep. This blueprint therefore stores the database in Aiven PostgreSQL and places uploaded source CSV archives in `/tmp`; archive files can disappear, while reconciliation and audit records in PostgreSQL remain. Do not use this setup for real bank or customer data unless you add durable, access-controlled file storage and have reviewed the applicable privacy and retention requirements.
+
+1. Create an Aiven PostgreSQL service on its Free tier. Copy its connection URI privately; do not put it in GitHub or this repository.
+2. In Render, create a Blueprint from this private GitHub repository and use `render.yaml`. Choose the Free instance. Set the requested private values in Render's environment setup: `DATABASE_URL` (the Aiven PostgreSQL URI), `APP_USERNAME`, `APP_PASSWORD_HASH`, and `JWT_SECRET`. Generate the password hash and secret locally; never enter a plaintext password as `APP_PASSWORD_HASH`.
+3. Deploy with one web instance. Render's assigned hostname is added to the exact-host allowlist automatically, and the blueprint enables secure cookies and `/health/ready` checks.
+4. Verify `/health/ready`, then sign in with the bootstrap admin credentials you configured. The database starts empty; local SQLite records, CSV files, `.env`, and backups are not deployed.
+
+Render's Free web service may take about a minute to wake after idle time. Aiven Free PostgreSQL has 1 GB of storage, a 20-connection limit, and can be powered off after extended inactivity. Review each provider's current free-tier terms and keep independent backups.
+
 ## Deploy on Railway
 
 Push the project to a private GitHub repository, then create a Railway project from that repository. Railway detects the root `Dockerfile`. The container reads Railway's `PORT` variable and listens on `0.0.0.0`; the Railway health check is `/health/ready`.
