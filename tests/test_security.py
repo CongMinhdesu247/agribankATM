@@ -218,6 +218,34 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request("/api/audit-logs?date_to=9999-12-31",
                                             headers={"authorization": f"Bearer {token}"}))[0], 422)
 
+    async def test_dashboard_keeps_other_runs_visible_and_hides_pending_reviews_including_null_run(self):
+        token = await self.token()
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.executemany("""INSERT INTO reconciliation_results
+                (trans_id, recon_status, run_id) VALUES (?, ?, ?)""", [
+                ("matched", "MATCHED", "current"),
+                ("visible", "AMOUNT_MISMATCH", "current"),
+                ("pending", "AMOUNT_MISMATCH", "current"),
+                ("other-run", "AMOUNT_MISMATCH", "current"),
+                ("legacy-pending", "AMOUNT_MISMATCH", None),
+                ("legacy-visible", "AMOUNT_MISMATCH", None),
+            ])
+            connection.executemany("""INSERT INTO audit_logs
+                (trans_id, action_type, napas_ref_code, reason, performed_by, review_status, run_id)
+                VALUES (?, 'REFUND', 'ref', 'reason', 'admin', 'PENDING', ?)""", [
+                ("pending", "current"), ("other-run", "old"),
+                ("legacy-pending", None), ("legacy-visible", "old"),
+            ])
+        headers = {"authorization": f"Bearer {token}"}
+        status, _, body = await self.request("/api/stats", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data"], {"MATCHED": 1, "AMOUNT_MISMATCH": 3})
+        status, _, body = await self.request("/api/anomalies", headers=headers)
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result["count"], 3)
+        self.assertEqual({row["trans_id"] for row in result["data"]}, {"visible", "other-run", "legacy-visible"})
+
     async def test_sessions_store_only_hashes_and_survive_schema_initialization(self):
         token = await self.token()
         reconcile_engine.initialize_database()
@@ -243,6 +271,12 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(result)["discrepancy_count"], 1)
         self.assertEqual((await self.request("/api/upload-and-reconcile", method="POST", body=body, headers=headers))[0], 200)
         auth = {"authorization": f"Bearer {token}"}
+        status, _, stats_body = await self.request("/api/stats", headers=auth)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(stats_body)["data"]["AMOUNT_MISMATCH"], 1)
+        status, _, anomalies_body = await self.request("/api/anomalies", headers=auth)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(anomalies_body)["data"][0]["trans_id"], "0001")
         self.assertEqual((await self.request("/api/resolve", method="POST", headers=auth, data={
             "trans_id": "0001", "action_type": "REFUND", "napas_ref_code": "=1+1", "reason": "Review required",
         }))[0], 200)

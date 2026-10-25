@@ -373,7 +373,9 @@ def get_stats(_user=Depends(current_user)):
             WHERE resolved = 0 AND recon_status != 'MATCHED'
               AND NOT EXISTS (
                   SELECT 1 FROM audit_logs a WHERE a.trans_id = reconciliation_results.trans_id
-                    AND a.run_id IS reconciliation_results.run_id AND a.review_status = 'PENDING'
+                    AND (a.run_id = reconciliation_results.run_id
+                         OR (a.run_id IS NULL AND reconciliation_results.run_id IS NULL))
+                    AND a.review_status = 'PENDING'
               )
             GROUP BY recon_status
         ''')
@@ -432,7 +434,9 @@ def get_anomalies(
     page, page_size = _bounded_page(page, page_size, 200)
     clauses = ["recon_status != 'MATCHED'", "resolved = 0",
                "NOT EXISTS (SELECT 1 FROM audit_logs a WHERE a.trans_id = reconciliation_results.trans_id "
-               "AND a.run_id IS reconciliation_results.run_id AND a.review_status = 'PENDING')"]
+               "AND (a.run_id = reconciliation_results.run_id "
+               "OR (a.run_id IS NULL AND reconciliation_results.run_id IS NULL)) "
+               "AND a.review_status = 'PENDING')"]
     params: list[object] = []
     if trans_id.strip():
         clauses.append("trans_id LIKE ? ESCAPE '\\'")
