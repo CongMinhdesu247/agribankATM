@@ -1,3 +1,8 @@
+https://agribank-atm.onrender.com/
+account: CongMinh
+password: 02042007minh
+
+
 # Agribank reconciliation review
 
 FastAPI serves the single-page interface and reconciliation API. SQLite is available for local development; PostgreSQL is supported for deployment. The database is the source of truth; uploaded CSV files are validated, archived under an upload ID, and reconciled transactionally.
